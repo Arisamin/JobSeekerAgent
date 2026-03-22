@@ -32,7 +32,7 @@ graph TD
     step_4_0[4.0 Display selected job details]
     step_4_1[4.1 Show current status and URL]
     
-    step_5_0[5.0 Display status options dropdown]
+    step_5_0[5.0 Display status options dropdown: Discovered Applied InProcess RejectedMe RejectedByMe Accepted]
     step_5_1[5.1 Prompt user to select new status]
     step_5_1_1{5.1.1 User input valid?}
     step_5_2[5.2 Invalid status selection]

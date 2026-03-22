@@ -224,7 +224,7 @@ class ProcessedJobsDB:
                 title TEXT,
                 company TEXT,
                 url TEXT,
-                status TEXT DEFAULT 'Applied',
+                status TEXT DEFAULT 'Discovered',
                 created_at TEXT NOT NULL,
                 last_updated TEXT NOT NULL
             )
@@ -233,7 +233,7 @@ class ProcessedJobsDB:
         self.conn.commit()
         # Migrate existing records if needed (add new columns)
         try:
-            self.conn.execute("ALTER TABLE processed_jobs ADD COLUMN status TEXT DEFAULT 'Applied'")
+            self.conn.execute("ALTER TABLE processed_jobs ADD COLUMN status TEXT DEFAULT 'Discovered'")
             self.conn.commit()
         except sqlite3.OperationalError:
             pass  # Column already exists
@@ -253,7 +253,7 @@ class ProcessedJobsDB:
             INSERT OR IGNORE INTO processed_jobs (job_key, title, company, url, status, created_at, last_updated)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (job.job_key, job.title, job.company, job.url, "Applied", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
+            (job.job_key, job.title, job.company, job.url, "Discovered", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
         )
         self.conn.commit()
 
@@ -265,7 +265,7 @@ class ProcessedJobsDB:
 
     def update_job_status(self, job_id: int, new_status: str) -> None:
         """Update the status of a job."""
-        if new_status not in ["Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted"]:
+        if new_status not in ["Discovered", "Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted"]:
             raise ValueError(f"Invalid status: {new_status}")
         self.conn.execute(
             "UPDATE processed_jobs SET status = ?, last_updated = ? WHERE id = ?",
@@ -300,7 +300,7 @@ class ProcessedJobsDB:
 class UserDBUpdateMode:
     """Interactive mode for users to update job status in the database."""
     
-    STATUSES = ["Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted"]
+    STATUSES = ["Discovered", "Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted"]
 
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
