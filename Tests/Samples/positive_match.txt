@@ -1,0 +1,58 @@
+About the job
+Job Title
+
+Backend Software Engineer
+
+Job Description
+
+Backend Software Engineer 
+
+As a Backend Software Engineer, you will be involved in developing challenging software modules and systems within a complex and advanced environment in the medical, radiology informatics systems.
+
+Philips is developing the Philips Radiology Informatics Management solution which can serve different steps in the radiology workflow. Philips Image Management solution provides a complete and scalable local and wide area Picture Archiving and Communication System (PACS) solution for hospital and related institutions/sites, which will archive, distribute, retrieve, and display images and data from hospital modalities and information systems.
+
+Your Role
+
+You will be enhancing our clinical software products, specifically our Philips Image Management solutions, which play a crucial role in improving radiology workflows by ensuring efficient and reliable PACS systems that manage image and data distribution in hospital settings
+You will be part of the R&D team of Philips Image Management Product, which serves different steps in the Radiology workflow
+You will use AI development tools to boost your productivity and improve code quality
+You will design and develop AWS Cloud compliant services and use Cloud base practices and architecture
+You will design, implement, test, and integrate backend components, lead software design and technical reviews, mentor junior developers, and ensure high-quality, scalable code and compliance with engineering standards while collaborating on new and existing products.
+You will explore and adopt new technologies to enhance development processes. 
+A career at Philips comes with all sorts of wonderful benefits. Be sure to speak to your recruiter about benefits in your region. 
+
+How We Work Together
+
+We believe that we are better together than apart. For our office-based teams, this means working in-person at least 3 days per week. Onsite roles require full-time presence in the company’s facilities. Field roles are most effectively done outside of the company’s main facilities, generally at the customers’ or suppliers’ locations.
+
+This role is an office role.
+
+You're The Right Fit If
+
+You hold a Bachelor's / Master's Degree in Computer Science, Software Engineering, Information Technology or equivalent field
+You have 4+ years of programming experience in C++ or C#
+You have 4+ years of experience in backend development, including architecture design, infrastructure, networking, and system reliability
+You are proficient in at least one of the following programming languages: C++, or C#
+You have a solid understanding of the Windows Operating System and its implications on integrated applications
+You have experience working with large-scale, complex systems and navigating extensive codebases
+You are a team player with experience working with cross-functional teams
+You have strong verbal and written communication skills in English.
+
+Preferred Requirements
+
+Experience with C and Oracle PLSQL
+Experience with Python scripting
+Experience with Cloud development practices
+Familiarity with medical software development, including regulatory processes.
+
+About Philips
+
+We are a health technology company. We built our entire company around the belief that every human matters, and we won't stop until everybody everywhere has access to the quality healthcare that we all deserve. Do the work of your life to help improve the lives of others.
+
+Learn more about our business. 
+Discover our rich and exciting history. 
+Learn more about our purpose.
+
+If you’re interested in this role and have many, but not all, of the experiences needed, we encourage you to apply. You may still be the right candidate for this or other opportunities at Philips. Learn more about our commitment to diversity and inclusion here.
+
+#HealthcareInformatics

@@ -1,0 +1,7 @@
+{
+  "salary_min_ils": 25000,
+  "tech_stack": ["C#", ".NET", "Backend"],
+  "degree_required": "BSc Computer Science",
+  "university_priority": "Ben-Gurion University",
+  "work_model": "Hybrid/Remote"
+}

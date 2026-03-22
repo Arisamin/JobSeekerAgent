@@ -1,0 +1,55 @@
+About the job
+About the Company: We are a fast-growing, innovative medical device company developing cutting-edge connected hardware and software solutions.
+
+
+
+About the Position: We are looking for an experienced Senior QA Engineer with strong skills in both manual testing and test automation for mobile and web applications. This role requires the capability to design and build automation frameworks from the ground up. The ideal candidate is proactive, detail-oriented, and passionate about product quality.
+
+
+
+Responsibilities:
+
+Lead QA efforts across the full product lifecycle for mobile (iOS/Android) and web.
+Build and implement an automation framework from scratch, including selecting technologies and defining structure.
+Develop and maintain automated tests for UI, API, and end-to-end workflows.
+Execute manual testing including functional, regression, integration, and release validation.
+Perform hands-on testing involving physical hardware devices, BLE/BT connectivity, firmware behavior, and data synchronization.
+Create and manage test plans, test cases, and test documentation.
+Collaborate closely with product and development teams to define quality standards.
+Identify defects, analyze logs, and work with developers on rapid resolution.
+Support CI/CD pipeline integration and test execution automation.
+Improve QA processes, coverage, and test efficiency.
+
+
+Requirements:
+
+4+ years of QA engineering experience in manual and automated testing.
+Experience testing mobile (iOS/Android) and web applications.
+Experience designing and building automation frameworks.
+Hands-on experience working with hardware or IoT devices, sensors, and Bluetooth communication.
+Practical experience with automation tools/frameworks such as: Appium, Selenium, Cypress, Playwright, PyTest, XCTest, Espresso.
+Strong understanding of API testing.
+Experience with AWS environments and cloud-based test environments.
+Experience with CI/CD tools (Jenkins, GitLab CI, GitHub Actions).
+Solid understanding of QA methodologies, SDLC, and automated regression strategy.
+Ability to analyze logs, system metrics, networking, and debugging tools.
+Fluent English (spoken and written).
+
+
+Nice to Have:
+
+Experience with performance/load testing.
+Knowledge of monitoring tools such as Firebase, Crashlytics, Sentry.
+Experience working with Scrum/Agile processes.
+
+
+Personal Skills:
+
+Strong analytical and problem-solving abilities.
+Ownership mentality and ability to drive QA strategy end-to-end.
+Ability to work independently and as part of a cross-functional team.
+Excellent communication, documentation, and collaboration skills.
+Ability to manage multiple priorities in a fast-moving environment.
+
+
+Industry: Medical Equipment Manufacturing / IoT Employment Type: Full-time

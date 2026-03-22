@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Playwright/browser profile
+.playwright_profile/
+
+# Runtime outputs
+Logs/
+Reports/
+*.log
+*.sqlite
+*.db
+
+# VS Code local settings
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
