@@ -749,7 +749,9 @@ class LinkedInJobAgent:
                 search_url = self.build_search_url()
                 self.log_step("2.1", f"Navigating to LinkedIn search: {search_url}")
                 page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
-                self.jitter("2.2")
+                # Wait for page to fully load (job cards to render)
+                self.log_step("2.2", "Waiting 10 seconds for page to fully load job cards")
+                time.sleep(10)
 
                 if time.monotonic() >= run_deadline:
                     self.log_step("5.0", f"Run deadline reached ({self.max_run_seconds}s) before extraction")

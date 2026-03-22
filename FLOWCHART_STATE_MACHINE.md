@@ -4,8 +4,8 @@
     "flowchart": {
         "useMaxWidth": false,
         "htmlLabels": true,
-        "nodeSpacing": 10,
-        "rankSpacing": 40,
+        "nodeSpacing": 5,
+        "rankSpacing": 20,
         "diagramPadding": 20
     },
     "themeVariables": {
@@ -19,7 +19,7 @@ graph TD
     step_2_0_1{2.0.1 Primary profile launch success}
     step_2_0_2[2.0.2 Retry with local playwright_profile]
     step_2_1[2.1 Navigate to LinkedIn search URL with location Israel IL and geoId 101620260]
-    step_2_2[2.2 Apply jitter wait]
+    step_2_2[2.2 Wait 10 seconds for page to fully load]
 
     step_3_0[3.0 Begin extraction phase]
     step_3_0_1{3.0.1 Auth wall detected}
@@ -60,8 +60,8 @@ graph TD
     step_4_0_2{4.0.2 More jobs}
 
     step_6_0[6.0 Generate HTML report file]
-    step_5_1[5.1 Close browser context and DB]
-    end_node([End])
+    step_7_0[7.0 Close browser context and DB]
+    step_8_0[8.0 Wait/sleep N minutes]
 
     step_1_0 --> step_1_1
     step_1_1 --> step_2_0
@@ -119,12 +119,15 @@ graph TD
     step_4_0_2 -- "No" --> step_6_0
 
     step_5_0_none --> step_6_0
-    step_6_0 --> step_5_1
-    step_5_1 --> end_node
+    step_6_0 --> step_7_0
+    step_7_0 --> step_8_0
+    step_8_0 --> step_3_0
 
     classDef x0Step fill:#FFE000,stroke:#B58900,stroke-width:2px,color:#111111;
+    classDef waitStep fill:#FFA500,stroke:#B58900,stroke-width:2px,color:#111111;
     classDef normalStep fill:#ECECFF,stroke:#9370DB,stroke-width:1px,color:#333333;
 
-    class step_1_0,step_2_0,step_3_0,step_4_0,step_5_0_none,step_6_0 x0Step;
-    class step_1_1,step_2_0_1,step_2_0_2,step_2_1,step_2_2,step_3_0_1,step_3_9_auth,step_3_8_auth,step_3_0_2,step_3_0_3,step_3_9_cards,step_3_8_cards,step_3_1,step_3_1_1,step_3_5_deadline,step_3_1_2,step_3_1_3,step_3_5_shifted,step_3_1_4,step_3_1_5,step_3_5_next,step_3_1_6,step_3_1_7,step_3_1_8,step_3_5_skip,step_3_1_9,step_3_3,step_3_3_skip,step_3_4,step_3_7,step_4_0_1,step_4_1,step_4_2,step_4_3,step_4_4,step_4_0_2,step_5_1,end_node normalStep;
+    class step_1_0,step_2_0,step_3_0,step_4_0,step_5_0_none,step_6_0,step_7_0 x0Step;
+    class step_8_0 waitStep;
+    class step_1_1,step_2_0_1,step_2_0_2,step_2_1,step_2_2,step_3_0_1,step_3_9_auth,step_3_8_auth,step_3_0_2,step_3_0_3,step_3_9_cards,step_3_8_cards,step_3_1,step_3_1_1,step_3_5_deadline,step_3_1_2,step_3_1_3,step_3_5_shifted,step_3_1_4,step_3_1_5,step_3_5_next,step_3_1_6,step_3_1_7,step_3_1_8,step_3_5_skip,step_3_1_9,step_3_3,step_3_3_skip,step_3_4,step_3_7,step_4_0_1,step_4_1,step_4_2,step_4_3,step_4_4,step_4_0_2 normalStep;
 ```
