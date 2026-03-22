@@ -215,6 +215,7 @@ class ProcessedJobsDB:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path)
+        self.lock_path = db_path.parent / ".db_lock"
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS processed_jobs (
@@ -223,11 +224,24 @@ class ProcessedJobsDB:
                 title TEXT,
                 company TEXT,
                 url TEXT,
-                created_at TEXT NOT NULL
+                status TEXT DEFAULT 'Applied',
+                created_at TEXT NOT NULL,
+                last_updated TEXT NOT NULL
             )
             """
         )
         self.conn.commit()
+        # Migrate existing records if needed (add new columns)
+        try:
+            self.conn.execute("ALTER TABLE processed_jobs ADD COLUMN status TEXT DEFAULT 'Applied'")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            self.conn.execute("ALTER TABLE processed_jobs ADD COLUMN last_updated TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
     def seen(self, job_key: str) -> bool:
         cursor = self.conn.execute("SELECT 1 FROM processed_jobs WHERE job_key = ? LIMIT 1", (job_key,))
@@ -236,15 +250,143 @@ class ProcessedJobsDB:
     def add(self, job: JobRecord) -> None:
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO processed_jobs (job_key, title, company, url, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO processed_jobs (job_key, title, company, url, status, created_at, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (job.job_key, job.title, job.company, job.url, datetime.now(timezone.utc).isoformat()),
+            (job.job_key, job.title, job.company, job.url, "Applied", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
         )
         self.conn.commit()
 
+    def get_all_jobs(self) -> List[Dict]:
+        """Retrieve all jobs from the database."""
+        cursor = self.conn.execute("SELECT id, job_key, title, company, url, status, created_at, last_updated FROM processed_jobs ORDER BY created_at DESC")
+        columns = [desc[0] for desc in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def update_job_status(self, job_id: int, new_status: str) -> None:
+        """Update the status of a job."""
+        if new_status not in ["Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted"]:
+            raise ValueError(f"Invalid status: {new_status}")
+        self.conn.execute(
+            "UPDATE processed_jobs SET status = ?, last_updated = ? WHERE id = ?",
+            (new_status, datetime.now(timezone.utc).isoformat(), job_id),
+        )
+        self.conn.commit()
+
+    def acquire_lock(self, timeout: int = 10) -> bool:
+        """Acquire an exclusive lock on the database (prevents concurrent access)."""
+        import time
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                with open(self.lock_path, "x") as f:
+                    f.write(str(os.getpid()))
+                return True
+            except FileExistsError:
+                time.sleep(0.5)
+        return False
+
+    def release_lock(self) -> None:
+        """Release the database lock."""
+        try:
+            self.lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
     def close(self) -> None:
         self.conn.close()
+
+
+class UserDBUpdateMode:
+    """Interactive mode for users to update job status in the database."""
+    
+    STATUSES = ["Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted"]
+
+    def __init__(self, base_dir: Path):
+        self.base_dir = base_dir
+        self.db = ProcessedJobsDB(base_dir / "processed_jobs.db")
+        self.logger = build_logger(base_dir)
+
+    def run(self) -> None:
+        """Run the interactive UI form."""
+        if not self.db.acquire_lock():
+            print("❌ Error: Another instance of the agent is running. Please stop it first.")
+            return
+
+        try:
+            print("\n" + "="*60)
+            print("   JOB STATUS UPDATE MODE")
+            print("="*60 + "\n")
+
+            while True:
+                jobs = self.db.get_all_jobs()
+                if not jobs:
+                    print("⚠️  No jobs in the database yet.\n")
+                    break
+
+                print(f"📋 Found {len(jobs)} job(s) in database:\n")
+                for idx, job in enumerate(jobs, 1):
+                    status_marker = "✓" if job['status'] == 'Accepted' else "✗" if job['status'] == 'RejectedMe' else "→"
+                    print(f"  [{idx}] {status_marker} {job['title']} @ {job['company']} [{job['status']}]")
+
+                print("\n  [0] Done / Exit\n")
+
+                try:
+                    choice = input("Select job number to update (0 to exit): ").strip()
+                    if choice == "0":
+                        break
+                    job_idx = int(choice) - 1
+                    if not (0 <= job_idx < len(jobs)):
+                        print("❌ Invalid selection. Try again.\n")
+                        continue
+                except ValueError:
+                    print("❌ Invalid input. Please enter a number.\n")
+                    continue
+
+                selected_job = jobs[job_idx]
+                self._update_job_status(selected_job)
+                print()
+
+        finally:
+            self.db.release_lock()
+            self.db.close()
+            print("✅ Done. Locked released.\n")
+
+    def _update_job_status(self, job: Dict) -> None:
+        """UI form to update a single job's status."""
+        print("\n" + "-"*60)
+        print(f"Job: {job['title']}")
+        print(f"Company: {job['company']}")
+        print(f"URL: {job['url']}")
+        print(f"Current Status: {job['status']}")
+        print(f"Created: {job['created_at']}")
+        print(f"Last Updated: {job['last_updated']}")
+        print("-"*60 + "\n")
+
+        print("Select new status:\n")
+        for idx, status in enumerate(self.STATUSES, 1):
+            mark = "✓" if status == job['status'] else " "
+            print(f"  [{idx}] {status} {mark}")
+        print()
+
+        try:
+            choice = input("Enter new status number: ").strip()
+            status_idx = int(choice) - 1
+            if not (0 <= status_idx < len(self.STATUSES)):
+                print("❌ Invalid selection.\n")
+                return
+        except ValueError:
+            print("❌ Invalid input.\n")
+            return
+
+        new_status = self.STATUSES[status_idx]
+
+        try:
+            self.db.update_job_status(job['id'], new_status)
+            print(f"\n✅ Status updated to: {new_status}")
+            self.logger.info(f"Job status updated: {job['title']} @ {job['company']} -> {new_status}")
+        except Exception as e:
+            print(f"❌ Error updating status: {e}\n")
 
 
 class LinkedInJobAgent:
@@ -814,11 +956,22 @@ def parse_args() -> argparse.Namespace:
         default=12,
         help="Per-card budget to avoid stalls on dynamic DOM",
     )
+    parser.add_argument(
+        "--user-db-update",
+        action="store_true",
+        help="Run in interactive mode to update job status in the database",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    
+    if args.user_db_update:
+        updater = UserDBUpdateMode(base_dir=Path(__file__).resolve().parent)
+        updater.run()
+        return
+    
     agent = LinkedInJobAgent(
         base_dir=Path(__file__).resolve().parent,
         max_jobs=args.max_jobs,
