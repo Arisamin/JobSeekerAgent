@@ -32,7 +32,7 @@ graph TD
     step_4_0[4.0 Display selected job details]
     step_4_1[4.1 Show current status and URL]
     
-    step_5_0[5.0 Display status options dropdown: Discovered Applied InProcess RejectedMe RejectedByMe Accepted]
+    step_5_0[5.0 Display status dropdown Discovered Applied InProcess RejectedMe RejectedByMe Accepted Skipped Closed]
     step_5_1[5.1 Prompt user to select new status]
     step_5_1_1{5.1.1 User input valid?}
     step_5_2[5.2 Invalid status selection]
@@ -47,12 +47,12 @@ graph TD
     
     step_8_0[8.0 Release database lock]
     step_8_1[8.1 Close database connection]
-    end([End])
+    end_node([End])
 
     start --> step_1_0
     step_1_0 --> step_1_0_1
     step_1_0_1 -- "No" --> step_1_1
-    step_1_1 --> end
+    step_1_1 --> end_node
     step_1_0_1 -- "Yes" --> step_2_0
     
     step_2_0 --> step_2_0_1
@@ -84,7 +84,7 @@ graph TD
     step_7_1 --> step_3_0
     
     step_8_0 --> step_8_1
-    step_8_1 --> end
+    step_8_1 --> end_node
 
     classDef x0Step fill:#FFE000,stroke:#B58900,stroke-width:2px,color:#111111;
     classDef waitStep fill:#FFA500,stroke:#B58900,stroke-width:2px,color:#111111;

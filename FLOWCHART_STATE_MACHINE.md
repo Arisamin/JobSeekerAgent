@@ -47,7 +47,7 @@ graph TD
     step_3_1_9[3.1.9 Normalize URL and build job key]
     step_3_3{3.3 Already processed in DB}
     step_3_3_skip[3.3 Skip duplicate]
-    step_3_4[3.4 Save job to DB with status Discovered]
+    step_3_4[3.4 Save job to DB with status Discovered for later user decision]
     step_3_7[3.7 Extraction complete]
 
     step_4_0_1{4.0.1 Jobs extracted}

@@ -18,6 +18,7 @@ Reports/
 *.log
 *.sqlite
 *.db
+.db_lock
 
 # VS Code local settings
 .vscode/

@@ -263,9 +263,20 @@ class ProcessedJobsDB:
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+    def get_jobs_by_status(self, statuses: List[str]) -> List[Dict]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        cursor = self.conn.execute(
+            f"SELECT id, job_key, title, company, url, status, created_at, last_updated FROM processed_jobs WHERE status IN ({placeholders}) ORDER BY last_updated DESC",
+            tuple(statuses),
+        )
+        columns = [desc[0] for desc in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
     def update_job_status(self, job_id: int, new_status: str) -> None:
         """Update the status of a job."""
-        if new_status not in ["Discovered", "Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted"]:
+        if new_status not in ["Discovered", "Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted", "Skipped", "Closed"]:
             raise ValueError(f"Invalid status: {new_status}")
         self.conn.execute(
             "UPDATE processed_jobs SET status = ?, last_updated = ? WHERE id = ?",
@@ -299,8 +310,8 @@ class ProcessedJobsDB:
 
 class UserDBUpdateMode:
     """Interactive mode for users to update job status in the database."""
-    
-    STATUSES = ["Discovered", "Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted"]
+
+    STATUSES = ["Discovered", "Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted", "Skipped", "Closed"]
 
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
@@ -319,12 +330,25 @@ class UserDBUpdateMode:
             print("="*60 + "\n")
 
             while True:
-                jobs = self.db.get_all_jobs()
-                if not jobs:
+                all_jobs = self.db.get_all_jobs()
+                jobs = [
+                    job
+                    for job in all_jobs
+                    if job.get("title") != "Unknown title" and job.get("company") != "Unknown company"
+                ]
+
+                if not all_jobs:
                     print("⚠️  No jobs in the database yet.\n")
                     break
 
+                hidden_count = len(all_jobs) - len(jobs)
+                if not jobs:
+                    print("⚠️  Only placeholder records found (Unknown title/company).\n")
+                    break
+
                 print(f"📋 Found {len(jobs)} job(s) in database:\n")
+                if hidden_count > 0:
+                    print(f"ℹ️  Hidden {hidden_count} placeholder row(s) with Unknown title/company.\n")
                 for idx, job in enumerate(jobs, 1):
                     status_marker = "✓" if job['status'] == 'Accepted' else "✗" if job['status'] == 'RejectedMe' else "→"
                     print(f"  [{idx}] {status_marker} {job['title']} @ {job['company']} [{job['status']}]")
@@ -387,6 +411,377 @@ class UserDBUpdateMode:
             self.logger.info(f"Job status updated: {job['title']} @ {job['company']} -> {new_status}")
         except Exception as e:
             print(f"❌ Error updating status: {e}\n")
+
+
+class UserDBUpdateGUI:
+    """Windows desktop UI for updating job statuses (dropdowns + buttons)."""
+
+    STATUSES = UserDBUpdateMode.STATUSES
+
+    def __init__(self, base_dir: Path):
+        self.base_dir = base_dir
+        self.db = ProcessedJobsDB(base_dir / "processed_jobs.db")
+        self.logger = build_logger(base_dir)
+        self._jobs_by_id: Dict[int, Dict[str, Any]] = {}
+
+    def run(self) -> None:
+        if not self.db.acquire_lock():
+            print("❌ Error: Another instance of the agent is running. Please stop it first.")
+            return
+
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, ttk
+        except Exception as exc:
+            self.db.release_lock()
+            self.db.close()
+            print(f"❌ Failed to launch GUI mode ({exc}). Falling back to console mode.")
+            UserDBUpdateMode(self.base_dir).run()
+            return
+
+        self.tk = tk
+        self.ttk = ttk
+        self.messagebox = messagebox
+        self.root = tk.Tk()
+        self.root.title("Job Seeker Agent - DB Update")
+        self.root.geometry("1100x650")
+        self.root.minsize(980, 560)
+
+        self._build_layout()
+        self._load_jobs()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.mainloop()
+
+    def _build_layout(self) -> None:
+        root = self.root
+        ttk = self.ttk
+
+        container = ttk.Frame(root, padding=10)
+        container.pack(fill="both", expand=True)
+
+        title = ttk.Label(container, text="Job Status Update", font=("Segoe UI", 14, "bold"))
+        title.pack(anchor="w", pady=(0, 8))
+
+        self.info_var = self.tk.StringVar(value="Loading jobs...")
+        info_label = ttk.Label(container, textvariable=self.info_var)
+        info_label.pack(anchor="w", pady=(0, 8))
+
+        tree_wrap = ttk.Frame(container)
+        tree_wrap.pack(fill="both", expand=True)
+
+        columns = ("id", "title", "company", "status", "last_updated")
+        self.tree = ttk.Treeview(tree_wrap, columns=columns, show="headings", height=14)
+        self.tree.heading("id", text="ID")
+        self.tree.heading("title", text="Title")
+        self.tree.heading("company", text="Company")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("last_updated", text="Last Updated")
+        self.tree.column("id", width=70, anchor="center", stretch=False)
+        self.tree.column("title", width=380, anchor="w")
+        self.tree.column("company", width=200, anchor="w")
+        self.tree.column("status", width=120, anchor="center", stretch=False)
+        self.tree.column("last_updated", width=250, anchor="w")
+
+        y_scroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=y_scroll.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        y_scroll.pack(side="right", fill="y")
+
+        details_frame = ttk.LabelFrame(container, text="Selected Job", padding=10)
+        details_frame.pack(fill="x", pady=(10, 8))
+
+        self.selected_id_var = self.tk.StringVar(value="")
+        self.selected_title_var = self.tk.StringVar(value="")
+        self.selected_company_var = self.tk.StringVar(value="")
+        self.selected_url_var = self.tk.StringVar(value="")
+        self.current_status_var = self.tk.StringVar(value="")
+
+        ttk.Label(details_frame, text="ID:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
+        ttk.Label(details_frame, textvariable=self.selected_id_var).grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Label(details_frame, text="Current Status:").grid(row=0, column=2, sticky="e", padx=(12, 6), pady=2)
+        ttk.Label(details_frame, textvariable=self.current_status_var).grid(row=0, column=3, sticky="w", pady=2)
+
+        ttk.Label(details_frame, text="Title:").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=2)
+        ttk.Label(details_frame, textvariable=self.selected_title_var).grid(row=1, column=1, columnspan=3, sticky="w", pady=2)
+
+        ttk.Label(details_frame, text="Company:").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=2)
+        ttk.Label(details_frame, textvariable=self.selected_company_var).grid(row=2, column=1, columnspan=3, sticky="w", pady=2)
+
+        ttk.Label(details_frame, text="URL:").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=2)
+        ttk.Entry(details_frame, textvariable=self.selected_url_var, state="readonly", width=110).grid(
+            row=3, column=1, columnspan=3, sticky="we", pady=2
+        )
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(4, 0))
+
+        ttk.Label(controls, text="Filter Status:").pack(side="left", padx=(0, 8))
+        self.filter_status_values = ["All", *self.STATUSES]
+        self.filter_status_var = self.tk.StringVar(value="All")
+        self.filter_combo = ttk.Combobox(
+            controls,
+            textvariable=self.filter_status_var,
+            values=self.filter_status_values,
+            state="readonly",
+            width=16,
+        )
+        self.filter_combo.pack(side="left", padx=(0, 12))
+        self.filter_combo.bind("<<ComboboxSelected>>", self._on_filter_changed)
+
+        ttk.Label(controls, text="New Status:").pack(side="left", padx=(0, 8))
+        self.new_status_var = self.tk.StringVar(value=self.STATUSES[0])
+        self.status_combo = ttk.Combobox(
+            controls,
+            textvariable=self.new_status_var,
+            values=self.STATUSES,
+            state="readonly",
+            width=20,
+        )
+        self.status_combo.pack(side="left")
+
+        ttk.Button(controls, text="Apply Status", command=self._apply_status, width=16).pack(side="left", padx=(10, 6))
+        ttk.Button(controls, text="Refresh", command=self._load_jobs, width=12).pack(side="left", padx=6)
+        ttk.Button(controls, text="Close", command=self._on_close, width=12).pack(side="right")
+
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+    def _filtered_jobs(self) -> List[Dict[str, Any]]:
+        jobs = self.db.get_all_jobs()
+        visible_jobs = [
+            job
+            for job in jobs
+            if job.get("title") != "Unknown title" and job.get("company") != "Unknown company"
+        ]
+
+        selected_status = self.filter_status_var.get().strip()
+        if selected_status and selected_status != "All":
+            visible_jobs = [job for job in visible_jobs if job.get("status") == selected_status]
+
+        return visible_jobs
+
+    def _on_filter_changed(self, _event: Any) -> None:
+        self._load_jobs()
+
+    def _load_jobs(self) -> None:
+        selected_item = self.tree.selection()
+        previously_selected_id = None
+        if selected_item:
+            values = self.tree.item(selected_item[0], "values")
+            if values:
+                previously_selected_id = int(values[0])
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        jobs = self._filtered_jobs()
+        self._jobs_by_id = {int(job["id"]): job for job in jobs}
+
+        for job in jobs:
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    job["id"],
+                    job["title"],
+                    job["company"],
+                    job["status"],
+                    job["last_updated"],
+                ),
+            )
+
+        current_filter = self.filter_status_var.get().strip() or "All"
+        self.info_var.set(
+            f"Loaded {len(jobs)} job(s). Filter: {current_filter}. Select a row, choose status, then click Apply Status."
+        )
+
+        if not jobs:
+            self._clear_selection_details()
+            return
+
+        target_item = None
+        if previously_selected_id is not None:
+            for item in self.tree.get_children():
+                values = self.tree.item(item, "values")
+                if values and int(values[0]) == previously_selected_id:
+                    target_item = item
+                    break
+        if target_item is None:
+            target_item = self.tree.get_children()[0]
+
+        self.tree.selection_set(target_item)
+        self.tree.focus(target_item)
+        self._on_select(None)
+
+    def _clear_selection_details(self) -> None:
+        self.selected_id_var.set("")
+        self.selected_title_var.set("")
+        self.selected_company_var.set("")
+        self.selected_url_var.set("")
+        self.current_status_var.set("")
+
+    def _on_select(self, _event: Any) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            self._clear_selection_details()
+            return
+
+        values = self.tree.item(selected[0], "values")
+        if not values:
+            self._clear_selection_details()
+            return
+
+        job_id = int(values[0])
+        job = self._jobs_by_id.get(job_id)
+        if not job:
+            self._clear_selection_details()
+            return
+
+        self.selected_id_var.set(str(job["id"]))
+        self.selected_title_var.set(job["title"])
+        self.selected_company_var.set(job["company"])
+        self.selected_url_var.set(job["url"])
+        self.current_status_var.set(job["status"])
+        self.new_status_var.set(job["status"])
+
+    def _apply_status(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            self.messagebox.showwarning("No Selection", "Please select a job first.")
+            return
+
+        values = self.tree.item(selected[0], "values")
+        job_id = int(values[0])
+        new_status = self.new_status_var.get().strip()
+
+        if new_status not in self.STATUSES:
+            self.messagebox.showerror("Invalid Status", "Please choose a valid status from the dropdown.")
+            return
+
+        job = self._jobs_by_id.get(job_id)
+        if not job:
+            self.messagebox.showerror("Missing Job", "Selected job was not found. Please refresh.")
+            return
+
+        try:
+            self.db.update_job_status(job_id, new_status)
+            self.logger.info(f"Job status updated: {job['title']} @ {job['company']} -> {new_status}")
+            self._load_jobs()
+            self.info_var.set(f"Updated: {job['title']} @ {job['company']} -> {new_status}")
+        except Exception as exc:
+            self.messagebox.showerror("Update Failed", f"Failed to update status: {exc}")
+
+    def _on_close(self) -> None:
+        try:
+            self.db.release_lock()
+            self.db.close()
+        finally:
+            self.root.destroy()
+
+
+class SkippedJobsMaintenanceTask:
+    """Scheduled task: verify skipped job URLs and mark closed jobs as Closed."""
+
+    def __init__(self, base_dir: Path, headless: bool = True):
+        self.base_dir = base_dir
+        self.headless = headless
+        self.db = ProcessedJobsDB(base_dir / "processed_jobs.db")
+        self.logger = build_logger(base_dir)
+
+    def _looks_closed(self, title: str, body: str, url: str) -> bool:
+        lowered_title = (title or "").lower()
+        lowered_body = (body or "").lower()
+        lowered_url = (url or "").lower()
+
+        dead_markers = [
+            "page not found",
+            "we can't seem to find this page",
+            "this job is no longer available",
+            "job is no longer available",
+            "no longer accepting applications",
+            "this job has expired",
+            "job has expired",
+            "position has been filled",
+            "404",
+        ]
+
+        if any(marker in lowered_title for marker in dead_markers):
+            return True
+        if any(marker in lowered_body for marker in dead_markers):
+            return True
+        if "/404" in lowered_url:
+            return True
+        return False
+
+    def run(self) -> None:
+        if not self.db.acquire_lock():
+            print("❌ Error: Another instance of the agent is running. Please stop it first.")
+            return
+
+        self.logger.info("Starting skipped-jobs maintenance task", extra={"step": "M.0"})
+
+        try:
+            skipped_jobs = self.db.get_jobs_by_status(["Skipped"])
+            if not skipped_jobs:
+                self.logger.info("No skipped jobs to verify", extra={"step": "M.1"})
+                print("ℹ️ No skipped jobs to verify.")
+                return
+
+            sync_api = importlib.import_module("playwright.sync_api")
+            sync_playwright = getattr(sync_api, "sync_playwright")
+
+            closed_count = 0
+            kept_count = 0
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=self.headless)
+                page = browser.new_page()
+                page.set_default_timeout(30000)
+
+                for job in skipped_jobs:
+                    job_title = job.get("title") or "Unknown title"
+                    job_company = job.get("company") or "Unknown company"
+                    job_url = job.get("url") or ""
+                    self.logger.info(
+                        f"Checking skipped job URL: {job_title} @ {job_company}",
+                        extra={"step": "M.2"},
+                    )
+
+                    is_closed = False
+                    try:
+                        response = page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(1000)
+                        title = page.title()
+                        body = page.content()
+
+                        if response and response.status in {404, 410}:
+                            is_closed = True
+                        elif self._looks_closed(title=title, body=body, url=page.url):
+                            is_closed = True
+                    except Exception as exc:
+                        self.logger.info(
+                            f"Skipped job URL check failed (keeping Skipped): {job_title} @ {job_company} ({exc})",
+                            extra={"step": "M.3"},
+                        )
+
+                    if is_closed:
+                        self.db.update_job_status(job["id"], "Closed")
+                        closed_count += 1
+                        self.logger.info(
+                            f"Marked Closed: {job_title} @ {job_company}",
+                            extra={"step": "M.4"},
+                        )
+                    else:
+                        kept_count += 1
+
+                browser.close()
+
+            summary = f"Skipped maintenance complete. Closed={closed_count}, StillSkipped={kept_count}"
+            self.logger.info(summary, extra={"step": "M.5"})
+            print(f"✅ {summary}")
+        finally:
+            self.db.release_lock()
+            self.db.close()
 
 
 class LinkedInJobAgent:
@@ -502,6 +897,18 @@ class LinkedInJobAgent:
                     return
             except Exception:
                 continue
+
+    @staticmethod
+    def _canonicalize_job_url(url: str) -> str:
+        cleaned = (url or "").strip()
+        if not cleaned:
+            return ""
+        cleaned = cleaned.split("?", 1)[0]
+        cleaned = cleaned.split("#", 1)[0]
+        view_match = re.search(r"linkedin\.com/jobs/view/(\d+)", cleaned)
+        if view_match:
+            return f"https://www.linkedin.com/jobs/view/{view_match.group(1)}/"
+        return cleaned
 
     def _get_cards_locator(self, page: Any) -> Any:
         selectors = [
@@ -778,6 +1185,15 @@ class LinkedInJobAgent:
                 if not company:
                     company = "Unknown company"
 
+                if title == "Unknown title" or company == "Unknown company":
+                    self.log_step("3.5", f"Skipping low-quality card {index + 1}: missing title/company")
+                    continue
+
+                job_url = self._canonicalize_job_url(job_url)
+                if not job_url:
+                    self.log_step("3.5", f"Skipping card {index + 1}: missing job URL")
+                    continue
+
                 key_source = f"{title}|{company}|{job_url}"
                 job_key = hashlib.sha256(key_source.encode("utf-8")).hexdigest()
 
@@ -959,19 +1375,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--user-db-update",
         action="store_true",
-        help="Run in interactive mode to update job status in the database",
+        help="Run Windows GUI mode to update job status in the database",
+    )
+    parser.add_argument(
+        "--user-db-update-cli",
+        action="store_true",
+        help="Run console (text) mode to update job status in the database",
+    )
+    parser.add_argument(
+        "--run-skipped-maintenance",
+        action="store_true",
+        help="Run scheduled task to verify skipped jobs by URL and mark closed jobs",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    
+
+    if args.run_skipped_maintenance:
+        maintenance = SkippedJobsMaintenanceTask(
+            base_dir=Path(__file__).resolve().parent,
+            headless=True,
+        )
+        maintenance.run()
+        return
+
     if args.user_db_update:
+        updater_gui = UserDBUpdateGUI(base_dir=Path(__file__).resolve().parent)
+        updater_gui.run()
+        return
+
+    if args.user_db_update_cli:
         updater = UserDBUpdateMode(base_dir=Path(__file__).resolve().parent)
         updater.run()
         return
-    
+
     agent = LinkedInJobAgent(
         base_dir=Path(__file__).resolve().parent,
         max_jobs=args.max_jobs,
