@@ -8,8 +8,11 @@ import os
 import random
 import re
 import sqlite3
+import subprocess
 import sys
 import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +54,17 @@ def load_json(path: Path) -> Dict:
 
 def normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def format_display_datetime(value: Optional[str]) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    try:
+        dt = datetime.fromisoformat(raw)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return raw
 
 
 def find_salary_values_ils(job_text: str) -> List[int]:
@@ -679,6 +693,175 @@ class UserDBUpdateGUI:
             self.root.destroy()
 
 
+class ReportActionsServer:
+    """Serve latest report and accept status updates from report HTML."""
+
+    def __init__(self, base_dir: Path, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True):
+        self.base_dir = base_dir
+        self.host = host
+        self.port = port
+        self.open_browser = open_browser
+
+    def _latest_report_path(self) -> Optional[Path]:
+        reports_dir = self.base_dir / "Reports"
+        if not reports_dir.exists():
+            return None
+        report_files = sorted(reports_dir.glob("run_report_*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return report_files[0] if report_files else None
+
+    def _apply_updates(self, updates: List[Dict[str, Any]]) -> Tuple[bool, str, int]:
+        db = ProcessedJobsDB(self.base_dir / "processed_jobs.db")
+        if not db.acquire_lock(timeout=3):
+            db.close()
+            return False, "Database is locked by another process.", 0
+
+        try:
+            allowed = set(UserDBUpdateMode.STATUSES)
+            updated_count = 0
+            for update in updates:
+                job_id = int(update.get("id"))
+                new_status = str(update.get("status", "")).strip()
+                if new_status not in allowed:
+                    return False, f"Invalid status: {new_status}", updated_count
+                db.update_job_status(job_id, new_status)
+                updated_count += 1
+        except Exception as exc:
+            return False, str(exc), 0
+        finally:
+            db.release_lock()
+            db.close()
+
+        return True, "OK", updated_count
+
+    def _launch_user_update_mode(self) -> None:
+        cmd = [sys.executable, str(self.base_dir / "agent_engine.py"), "--user-db-update"]
+        subprocess.Popen(cmd, cwd=str(self.base_dir))
+
+    @staticmethod
+    def _json_bytes(payload: Dict[str, Any]) -> bytes:
+        return json.dumps(payload).encode("utf-8")
+
+    def run(self) -> None:
+        report_path = self._latest_report_path()
+        if report_path is None:
+            print("❌ No report found. Run agent first to generate one.")
+            return
+
+        server_context = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send_bytes(self, status_code: int, content_type: str, data: bytes) -> None:
+                self.send_response(status_code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self) -> None:
+                if self.path not in {"/", "/report"}:
+                    self._send_bytes(404, "text/plain; charset=utf-8", b"Not found")
+                    return
+                try:
+                    data = report_path.read_bytes()
+                    self._send_bytes(200, "text/html; charset=utf-8", data)
+                except Exception as exc:
+                    self._send_bytes(500, "text/plain; charset=utf-8", str(exc).encode("utf-8"))
+
+            def do_POST(self) -> None:
+                if self.path != "/apply-status-updates":
+                    self._send_bytes(404, "application/json; charset=utf-8", ReportActionsServer._json_bytes({"ok": False, "error": "Not found"}))
+                    return
+
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                    payload_raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+                    payload = json.loads(payload_raw.decode("utf-8"))
+                    updates = payload.get("updates", [])
+                    if not isinstance(updates, list):
+                        self._send_bytes(400, "application/json; charset=utf-8", ReportActionsServer._json_bytes({"ok": False, "error": "updates must be a list"}))
+                        return
+
+                    ok, message, updated_count = server_context._apply_updates(updates)
+                    if not ok:
+                        self._send_bytes(409, "application/json; charset=utf-8", ReportActionsServer._json_bytes({"ok": False, "error": message, "updated_count": updated_count}))
+                        return
+
+                    launched = False
+                    if updated_count > 0:
+                        server_context._launch_user_update_mode()
+                        launched = True
+
+                    self._send_bytes(
+                        200,
+                        "application/json; charset=utf-8",
+                        ReportActionsServer._json_bytes({"ok": True, "updated_count": updated_count, "launched": launched}),
+                    )
+                except Exception as exc:
+                    self._send_bytes(500, "application/json; charset=utf-8", ReportActionsServer._json_bytes({"ok": False, "error": str(exc)}))
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        selected_port = self.port
+        httpd = None
+        for candidate_port in range(self.port, self.port + 15):
+            try:
+                httpd = ThreadingHTTPServer((self.host, candidate_port), Handler)
+                selected_port = candidate_port
+                break
+            except OSError:
+                continue
+
+        if httpd is None:
+            print(f"❌ Could not start report server on ports {self.port}-{self.port + 14}")
+            return
+
+        url = f"http://{self.host}:{selected_port}/"
+        print(f"✅ Serving latest report: {report_path.name}")
+        print(f"🌐 Open: {url}")
+        if self.open_browser:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            httpd.server_close()
+
+
+def run_easy_mode(args: argparse.Namespace, base_dir: Path) -> None:
+    print("\n🚀 Easy mode starting: scan jobs, then open update page...\n")
+
+    agent = LinkedInJobAgent(
+        base_dir=base_dir,
+        max_jobs=args.max_jobs,
+        headless=args.headless,
+        query=args.query,
+        user_data_dir=args.user_data_dir,
+        max_run_seconds=args.max_run_seconds,
+        max_extract_seconds=args.max_extract_seconds,
+        per_card_seconds=args.per_card_seconds,
+    )
+    try:
+        agent.run()
+    except Exception as exc:
+        print(f"⚠️ Scan ended with warning: {exc}")
+        print("⚠️ Continuing to open latest report for status updates...")
+
+    print("\n✅ Scan finished. Opening update page in your browser...\n")
+    server = ReportActionsServer(
+        base_dir=base_dir,
+        host=args.report_host,
+        port=args.report_port,
+        open_browser=not args.no_open_browser,
+    )
+    server.run()
+
+
 class SkippedJobsMaintenanceTask:
     """Scheduled task: verify skipped job URLs and mark closed jobs as Closed."""
 
@@ -1004,7 +1187,52 @@ class LinkedInJobAgent:
                 )
             )
 
-        body_content = "".join(cards_html) if cards_html else "<p>No jobs were extracted in this run.</p>"
+        run_results_content = "".join(cards_html) if cards_html else "<p>No jobs were extracted in this run.</p>"
+
+        db_jobs = self.db.get_all_jobs()
+        db_rows: List[str] = []
+        for job in db_jobs:
+            status_options = "".join(
+                [
+                    f"<option value='{html.escape(status)}'{' selected' if status == job['status'] else ''}>{html.escape(status)}</option>"
+                    for status in UserDBUpdateMode.STATUSES
+                ]
+            )
+            db_rows.append(
+                "".join(
+                    [
+                        "<tr>",
+                        f"<td>{job['id']}</td>",
+                        f"<td>{html.escape(job['title'] or 'N/A')}</td>",
+                        f"<td>{html.escape(job['company'] or 'N/A')}</td>",
+                        f"<td><a href='{html.escape(job['url'] or '')}' target='_blank'>{html.escape(job['url'] or '')}</a></td>",
+                        (
+                            "<td>"
+                            f"<select class='status-select' data-job-id='{job['id']}'>"
+                            f"{status_options}"
+                            "</select>"
+                            "</td>"
+                        ),
+                        f"<td>{html.escape(format_display_datetime(job.get('last_updated')))}</td>",
+                        "</tr>",
+                    ]
+                )
+            )
+
+        db_jobs_section = (
+            "".join(
+                [
+                    "<div class='toolbar'>",
+                    "<button id='update-agent-btn' class='primary'>Update Agent</button>",
+                    "<span id='apply-status-msg' class='muted'>Update Agent sends selected statuses to DB and opens DB update mode.</span>",
+                    "</div>",
+                    "<table><thead><tr><th>ID</th><th>Title</th><th>Company</th><th>URL</th><th>Status</th><th>Last Updated</th></tr></thead>",
+                    f"<tbody>{''.join(db_rows)}</tbody></table>",
+                ]
+            )
+            if db_rows
+            else "<p>No jobs found in DB.</p>"
+        )
 
         html_report = "".join(
             [
@@ -1014,26 +1242,85 @@ class LinkedInJobAgent:
                 "<style>",
                 "body{font-family:Segoe UI,Arial,sans-serif;margin:24px;background:#0f172a;color:#e2e8f0}",
                 "h1,h2{margin:0 0 10px}",
+                "h3{margin:0 0 8px}",
                 ".meta{margin:0 0 16px;color:#94a3b8}",
                 ".summary{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0 20px}",
                 ".pill{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:8px 12px}",
                 ".job-card{background:#111827;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:16px}",
+                ".section{background:#111827;border:1px solid #334155;border-radius:10px;margin:14px 0;overflow:hidden}",
+                "details>summary{cursor:pointer;padding:14px 16px;background:#1f2937;font-weight:700;user-select:none}",
+                ".section-body{padding:14px 16px}",
                 "table{width:100%;border-collapse:collapse;margin-top:10px}",
                 "th,td{border:1px solid #334155;padding:8px;vertical-align:top}",
                 "th{background:#1f2937}",
                 "a{color:#93c5fd}",
                 ".badge{background:#1d4ed8;color:#fff;border-radius:6px;padding:2px 8px}",
                 ".approval{margin-top:12px;font-weight:600}",
+                ".toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px}",
+                "button.primary{background:#2563eb;color:#fff;border:1px solid #1d4ed8;border-radius:6px;padding:8px 14px;cursor:pointer}",
+                "button.primary:hover{background:#1d4ed8}",
+                "select.status-select{width:100%;min-width:140px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px}",
+                ".muted{color:#94a3b8}",
+                ".params-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}",
+                ".param{background:#0b1220;border:1px solid #263244;border-radius:8px;padding:8px 10px}",
                 "</style></head><body>",
                 "<h1>Autonomous LinkedIn Job Agent Report</h1>",
-                f"<p class='meta'><strong>Generated:</strong> {html.escape(datetime.now().isoformat())} | <strong>Query:</strong> {html.escape(self.query)}</p>",
+                f"<p class='meta'><strong>Generated:</strong> {html.escape(datetime.now().strftime('%Y-%m-%d %H:%M'))} | <strong>Query:</strong> {html.escape(self.query)}</p>",
+                "<details class='section'>",
+                "<summary>A) Current run results and search parameters used</summary>",
+                "<div class='section-body'>",
                 "<div class='summary'>",
                 f"<div class='pill'>Total Extracted: <strong>{len(self.report_entries)}</strong></div>",
                 f"<div class='pill'>STRONG MATCH: <strong>{strong_count}</strong></div>",
                 f"<div class='pill'>REVIEW MANUALLY: <strong>{review_count}</strong></div>",
                 f"<div class='pill'>DO NOT APPLY: <strong>{reject_count}</strong></div>",
                 "</div>",
-                body_content,
+                "<h3>Search Parameters</h3>",
+                "<div class='params-grid'>",
+                f"<div class='param'><strong>Query</strong><br>{html.escape(self.query)}</div>",
+                f"<div class='param'><strong>Headless</strong><br>{html.escape(str(self.headless))}</div>",
+                f"<div class='param'><strong>Max Jobs</strong><br>{self.max_jobs}</div>",
+                f"<div class='param'><strong>Max Run Seconds</strong><br>{self.max_run_seconds}</div>",
+                f"<div class='param'><strong>Max Extract Seconds</strong><br>{self.max_extract_seconds}</div>",
+                f"<div class='param'><strong>Per Card Seconds</strong><br>{self.per_card_seconds}</div>",
+                "</div>",
+                "<h3 style='margin-top:14px'>Run Jobs</h3>",
+                run_results_content,
+                "</div></details>",
+                "<details class='section'>",
+                "<summary>B) Jobs in DB</summary>",
+                f"<div class='section-body'>{db_jobs_section}</div>",
+                "</details>",
+                "<script>",
+                "async function applyStatusUpdates(){",
+                "  const msg = document.getElementById('apply-status-msg');",
+                "  const btn = document.getElementById('update-agent-btn');",
+                "  if (window.location.protocol === 'file:') {",
+                "    msg.textContent = 'Update failed: report opened as local file. Run: python agent_engine.py --serve-latest-report';",
+                "    return;",
+                "  }",
+                "  const selects = Array.from(document.querySelectorAll('.status-select'));",
+                "  const updates = selects.map(s => ({id: Number(s.dataset.jobId), status: s.value}));",
+                "  btn.disabled = true;",
+                "  msg.textContent = 'Updating agent...';",
+                "  try {",
+                "    const res = await fetch('/apply-status-updates', {",
+                "      method: 'POST',",
+                "      headers: {'Content-Type': 'application/json'},",
+                "      body: JSON.stringify({updates})",
+                "    });",
+                "    const data = await res.json();",
+                "    if (!res.ok || !data.ok) { throw new Error(data.error || 'Apply failed'); }",
+                "    msg.textContent = `Updated ${data.updated_count} row(s). DB update UI launched.`;",
+                "  } catch (err) {",
+                "    const details = (err && err.message) ? err.message : 'Unknown error';",
+                "    msg.textContent = `Update failed: ${details}. Ensure server is running: python agent_engine.py --serve-latest-report`;",
+                "  } finally {",
+                "    btn.disabled = false;",
+                "  }",
+                "}",
+                "document.getElementById('update-agent-btn')?.addEventListener('click', applyStatusUpdates);",
+                "</script>",
                 "</body></html>",
             ]
         )
@@ -1334,7 +1621,10 @@ class LinkedInJobAgent:
                     except Exception as exc:
                         self.log_step("6.1", f"Failed to generate HTML report: {exc}")
                 self.log_step("5.1", "Closing browser context")
-                context.close()
+                try:
+                    context.close()
+                except Exception as exc:
+                    self.log_step("5.1", f"Browser context close warning: {exc}")
                 self.db.close()
 
 
@@ -1387,32 +1677,74 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run scheduled task to verify skipped jobs by URL and mark closed jobs",
     )
+    parser.add_argument(
+        "--serve-latest-report",
+        action="store_true",
+        help="Serve latest HTML report with status-apply endpoint",
+    )
+    parser.add_argument(
+        "--report-host",
+        type=str,
+        default="127.0.0.1",
+        help="Host for report server",
+    )
+    parser.add_argument(
+        "--report-port",
+        type=int,
+        default=8765,
+        help="Port for report server",
+    )
+    parser.add_argument(
+        "--no-open-browser",
+        action="store_true",
+        help="Do not auto-open browser when serving report",
+    )
+    parser.add_argument(
+        "--easy-mode",
+        action="store_true",
+        help="One-step mode: run scan once, then open report update page",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    base_dir = Path(__file__).resolve().parent
+
+    if args.easy_mode:
+        run_easy_mode(args=args, base_dir=base_dir)
+        return
 
     if args.run_skipped_maintenance:
         maintenance = SkippedJobsMaintenanceTask(
-            base_dir=Path(__file__).resolve().parent,
+            base_dir=base_dir,
             headless=True,
         )
         maintenance.run()
         return
 
+    if args.serve_latest_report:
+        server = ReportActionsServer(
+            base_dir=base_dir,
+            host=args.report_host,
+            port=args.report_port,
+            open_browser=not args.no_open_browser,
+        )
+        server.run()
+        return
+
     if args.user_db_update:
-        updater_gui = UserDBUpdateGUI(base_dir=Path(__file__).resolve().parent)
+        updater_gui = UserDBUpdateGUI(base_dir=base_dir)
         updater_gui.run()
         return
 
     if args.user_db_update_cli:
-        updater = UserDBUpdateMode(base_dir=Path(__file__).resolve().parent)
+        updater = UserDBUpdateMode(base_dir=base_dir)
         updater.run()
         return
 
     agent = LinkedInJobAgent(
-        base_dir=Path(__file__).resolve().parent,
+        base_dir=base_dir,
         max_jobs=args.max_jobs,
         headless=args.headless,
         query=args.query,
