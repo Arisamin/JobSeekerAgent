@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+class StepFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        if not hasattr(record, "step"):
+            record.step = "-"
+        return super().format(record)
+
+
 def ensure_logs_dir(base_dir: Path) -> Path:
     logs_dir = base_dir / "Logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -33,7 +40,7 @@ def build_logger(base_dir: Path) -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
-    formatter = logging.Formatter("%(asctime)s <step_%(step)s> %(message)s")
+    formatter = StepFormatter("%(asctime)s <step_%(step)s> %(message)s")
     file_handler = logging.FileHandler(log_filename, encoding="utf-8")
     stream_handler = logging.StreamHandler(sys.stdout)
     file_handler.setFormatter(formatter)
