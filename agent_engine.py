@@ -13,7 +13,7 @@ import sys
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -978,6 +978,7 @@ class LinkedInJobAgent:
         max_run_seconds: int,
         max_extract_seconds: int,
         per_card_seconds: int,
+        keep_db_open: bool = False,
     ):
         self.base_dir = base_dir
         self.max_jobs = max(5, min(max_jobs, 10))
@@ -987,6 +988,7 @@ class LinkedInJobAgent:
         self.max_run_seconds = max(30, max_run_seconds)
         self.max_extract_seconds = max(15, max_extract_seconds)
         self.per_card_seconds = max(5, per_card_seconds)
+        self.keep_db_open = keep_db_open
         self.logger = build_logger(base_dir)
         self.db = ProcessedJobsDB(base_dir / "processed_jobs.db")
         self.context_text = ""
@@ -1625,7 +1627,470 @@ class LinkedInJobAgent:
                     context.close()
                 except Exception as exc:
                     self.log_step("5.1", f"Browser context close warning: {exc}")
-                self.db.close()
+                if not self.keep_db_open:
+                    self.db.close()
+
+
+
+# ---------------------------------------------------------------------------
+# Telegram Interactive Session
+# ---------------------------------------------------------------------------
+
+JERUSALEM_TZ_NAME = "Asia/Jerusalem"
+
+
+def _now_jerusalem() -> datetime:
+    try:
+        import pytz  # type: ignore
+        tz = pytz.timezone(JERUSALEM_TZ_NAME)
+        return datetime.now(tz)
+    except Exception:
+        return datetime.now()
+
+
+def _fmt_jlm(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+class TelegramJobSession:
+    """
+    Interactive Telegram bot session for reviewing and acting on new job results.
+
+    States
+    ------
+    INTRO          – intro message sent, waiting for first command
+    BROWSING_NEW   – iterating through new (this-run) jobs one by one
+    BROWSING_DB    – iterating through all DB jobs one by one
+    APPLYING       – "Apply" flow in progress for a specific job
+    DONE           – session terminated
+
+    Commands (case-insensitive)
+    ---------------------------
+    next    – send next pending job; leave current at Discovered
+    apply   – mark current job Applied (and terminate any in-progress apply)
+    skip    – mark current job Skipped
+    done    – terminate session (process exits)
+    db      – switch to DB-browse mode; send jobs one by one
+    cancel  – if an apply is in progress, cancel it; otherwise no-op with help text
+    """
+
+    VALID_STATUSES = ["Discovered", "Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted", "Skipped", "Closed"]
+
+    # State constants
+    STATE_INTRO = "INTRO"
+    STATE_BROWSING_NEW = "BROWSING_NEW"
+    STATE_BROWSING_DB = "BROWSING_DB"
+    STATE_APPLYING = "APPLYING"
+    STATE_DONE = "DONE"
+
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: int,
+        db: "ProcessedJobsDB",
+        new_jobs: List[Dict],
+        query: str,
+        logger: logging.Logger,
+    ):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.db = db
+        self.new_jobs: List[Dict] = new_jobs        # jobs found in this run
+        self.query = query
+        self.logger = logger
+
+        self._state: str = self.STATE_INTRO
+        self._new_job_idx: int = 0                  # cursor into new_jobs
+        self._db_jobs: List[Dict] = []              # populated when entering DB-browse mode
+        self._db_job_idx: int = 0                   # cursor into _db_jobs
+        self._current_job: Optional[Dict] = None    # job under review / being applied
+        self._apply_in_progress_job_id: Optional[int] = None  # DB id of job being applied
+
+    # ------------------------------------------------------------------
+    # Low-level Telegram send helpers
+    # ------------------------------------------------------------------
+
+    def _send(self, text: str, parse_mode: str = "HTML") -> None:
+        """Send a message via the Bot API (blocking HTTP)."""
+        import urllib.request
+        import urllib.parse
+        payload = json.dumps({
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
+        }).encode("utf-8")
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                pass
+        except Exception as exc:
+            self.logger.warning(f"Telegram send failed: {exc}")
+
+    def _send_document(self, filename: str, content: bytes, caption: str = "") -> None:
+        """Send a file (e.g. HTML) via the Bot API using multipart/form-data."""
+        import urllib.request
+        import uuid
+        boundary = uuid.uuid4().hex
+        CRLF = b"\r\n"
+
+        def part_field(name: str, value: str) -> bytes:
+            return (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+
+        body = (
+            part_field("chat_id", str(self.chat_id))
+            + (part_field("caption", caption) if caption else b"")
+            + (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
+                f"Content-Type: text/html\r\n\r\n"
+            ).encode("utf-8")
+            + content
+            + CRLF
+            + f"--{boundary}--\r\n".encode("utf-8")
+        )
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                pass
+        except Exception as exc:
+            self.logger.warning(f"Telegram sendDocument failed: {exc}")
+
+    def _get_updates(self, offset: int, timeout: int = 20) -> List[Dict]:
+        """Long-poll for new messages."""
+        import urllib.request
+        url = (
+            f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+            f"?offset={offset}&timeout={timeout}&allowed_updates=%5B%22message%22%5D"
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=timeout + 5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data.get("result", [])
+        except Exception as exc:
+            self.logger.warning(f"Telegram getUpdates failed: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Job card helpers
+    # ------------------------------------------------------------------
+
+    def _job_card_text(self, job: Dict, index: int, total: int) -> str:
+        title   = html.escape(job.get("title") or "Unknown")
+        company = html.escape(job.get("company") or "Unknown")
+        url     = job.get("url") or ""
+        status  = html.escape(job.get("status") or "Discovered")
+        jid     = job.get("id", "?")
+        return (
+            f"<b>Job {index}/{total}</b>  |  ID: <code>{jid}</code>\n"
+            f"<b>{title}</b>\n"
+            f"🏢 {company}\n"
+            f"📌 Status: {status}\n"
+            f'🔗 <a href="{url}">{url}</a>\n\n'
+            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b>"
+        )
+
+    def _db_card_text(self, job: Dict, index: int, total: int) -> str:
+        title   = html.escape(job.get("title") or "Unknown")
+        company = html.escape(job.get("company") or "Unknown")
+        url     = job.get("url") or ""
+        status  = html.escape(job.get("status") or "")
+        jid     = job.get("id", "?")
+        return (
+            f"<b>[DB] Job {index}/{total}</b>  |  ID: <code>{jid}</code>\n"
+            f"<b>{title}</b>\n"
+            f"🏢 {company}\n"
+            f"📌 Status: {status}\n"
+            f'🔗 <a href="{url}">{url}</a>\n\n'
+            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b>"
+        )
+
+    # ------------------------------------------------------------------
+    # Command dispatch
+    # ------------------------------------------------------------------
+
+    def _handle_command(self, raw: str) -> bool:
+        """
+        Process a single user message.  Returns True if session should
+        continue, False if it should terminate (Done).
+        """
+        cmd = raw.strip().lower()
+
+        # --- In-progress apply guard -----------------------------------------
+        if self._apply_in_progress_job_id is not None:
+            if cmd == "cancel":
+                return self._cmd_cancel_apply()
+            # Any unrecognised message while apply is in progress
+            jid = self._apply_in_progress_job_id
+            self._send(
+                f"⚠️ Job application for job ID <code>{jid}</code> is still in progress.\n"
+                "Reply <b>Cancel</b> to abort it."
+            )
+            return True
+
+        # --- Global commands -------------------------------------------------
+        if cmd == "done":
+            return self._cmd_done()
+        if cmd == "db":
+            return self._cmd_db()
+        if cmd == "cancel":
+            self._send("ℹ️ No application is currently in progress.")
+            return True
+
+        # --- Browsing context ------------------------------------------------
+        current_list   = self.new_jobs if self._state == self.STATE_BROWSING_NEW else self._db_jobs
+        current_idx    = self._new_job_idx if self._state == self.STATE_BROWSING_NEW else self._db_job_idx
+        in_browse_mode = self._state in (self.STATE_BROWSING_NEW, self.STATE_BROWSING_DB)
+
+        if cmd == "next":
+            return self._cmd_next()
+        if cmd == "apply":
+            return self._cmd_apply()
+        if cmd == "skip":
+            return self._cmd_skip()
+
+        # Unrecognised
+        self._send(
+            "❓ Unknown command.\n"
+            "Available: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b> | <b>db</b> | <b>Cancel</b>"
+        )
+        return True
+
+    # --- individual command handlers -----------------------------------------
+
+    def _cmd_done(self) -> bool:
+        self._send("✅ Session complete. See you next run! 👋")
+        self._state = self.STATE_DONE
+        return False  # terminate
+
+    def _cmd_db(self) -> bool:
+        self._db_jobs = [
+            j for j in self.db.get_all_jobs()
+            if j.get("title") != "Unknown title" and j.get("company") != "Unknown company"
+        ]
+        if not self._db_jobs:
+            self._send("📭 No jobs in the database yet.")
+            return True
+        self._db_job_idx = 0
+        self._state = self.STATE_BROWSING_DB
+        self._current_job = self._db_jobs[0]
+        total = len(self._db_jobs)
+        self._send(self._db_card_text(self._current_job, 1, total))
+        return True
+
+    def _cmd_next(self) -> bool:
+        # Leave current job at its current status (Discovered stays Discovered)
+        if self._state == self.STATE_BROWSING_NEW:
+            self._new_job_idx += 1
+            if self._new_job_idx >= len(self.new_jobs):
+                self._send("✅ No more new jobs from this run.\nReply <b>db</b> to browse all DB jobs, or <b>Done</b> to finish.")
+                self._state = self.STATE_INTRO
+                self._current_job = None
+                return True
+            self._current_job = self.new_jobs[self._new_job_idx]
+            total = len(self.new_jobs)
+            self._send(self._job_card_text(self._current_job, self._new_job_idx + 1, total))
+            return True
+
+        if self._state == self.STATE_BROWSING_DB:
+            self._db_job_idx += 1
+            if self._db_job_idx >= len(self._db_jobs):
+                self._send("✅ No more jobs in the database.\nReply <b>Done</b> to finish.")
+                self._state = self.STATE_INTRO
+                self._current_job = None
+                return True
+            self._current_job = self._db_jobs[self._db_job_idx]
+            total = len(self._db_jobs)
+            self._send(self._db_card_text(self._current_job, self._db_job_idx + 1, total))
+            return True
+
+        # INTRO state – treat as "start browsing new jobs"
+        self._send("💡 Tip: Reply <b>Next</b> again to start browsing new jobs, or <b>db</b> to browse all DB jobs.")
+        return True
+
+    def _cmd_apply(self) -> bool:
+        if self._current_job is None:
+            self._send("⚠️ No active job selected. Reply <b>Next</b> to get the first job.")
+            return True
+        job_id = self._current_job.get("id")
+        title  = self._current_job.get("title", "?")
+        company = self._current_job.get("company", "?")
+        try:
+            self.db.update_job_status(job_id, "Applied")
+            self.logger.info(f"Telegram: Applied -> {title} @ {company} (id={job_id})")
+        except Exception as exc:
+            self._send(f"❌ DB update failed: {html.escape(str(exc))}")
+            return True
+        self._send(
+            f"✅ Marked <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b> as <b>Applied</b>.\n\n"
+            "Reply <b>Next</b> to continue | <b>Done</b> to finish | <b>db</b> to browse DB"
+        )
+        # Advance cursor so next "Next" shows the following job
+        if self._state == self.STATE_BROWSING_NEW:
+            self._new_job_idx += 1
+            self._current_job = self.new_jobs[self._new_job_idx] if self._new_job_idx < len(self.new_jobs) else None
+        elif self._state == self.STATE_BROWSING_DB:
+            self._db_job_idx += 1
+            self._current_job = self._db_jobs[self._db_job_idx] if self._db_job_idx < len(self._db_jobs) else None
+        return True
+
+    def _cmd_skip(self) -> bool:
+        if self._current_job is None:
+            self._send("⚠️ No active job selected. Reply <b>Next</b> to get the first job.")
+            return True
+        job_id  = self._current_job.get("id")
+        title   = self._current_job.get("title", "?")
+        company = self._current_job.get("company", "?")
+        try:
+            self.db.update_job_status(job_id, "Skipped")
+            self.logger.info(f"Telegram: Skipped -> {title} @ {company} (id={job_id})")
+        except Exception as exc:
+            self._send(f"❌ DB update failed: {html.escape(str(exc))}")
+            return True
+        self._send(
+            f"⏭️ Skipped <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>.\n\n"
+            "Reply <b>Next</b> | <b>Done</b> | <b>db</b>"
+        )
+        if self._state == self.STATE_BROWSING_NEW:
+            self._new_job_idx += 1
+            self._current_job = self.new_jobs[self._new_job_idx] if self._new_job_idx < len(self.new_jobs) else None
+        elif self._state == self.STATE_BROWSING_DB:
+            self._db_job_idx += 1
+            self._current_job = self._db_jobs[self._db_job_idx] if self._db_job_idx < len(self._db_jobs) else None
+        return True
+
+    def _cmd_cancel_apply(self) -> bool:
+        jid = self._apply_in_progress_job_id
+        self._apply_in_progress_job_id = None
+        self._state = self.STATE_BROWSING_NEW if self.new_jobs else self.STATE_INTRO
+        self._send(
+            f"🚫 Application for job ID <code>{jid}</code> cancelled.\n\n"
+            "Reply <b>Next</b> | <b>Done</b> | <b>db</b>"
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # Intro message
+    # ------------------------------------------------------------------
+
+    def send_intro(self) -> None:
+        count = len(self.new_jobs)
+        now_str = _fmt_jlm(_now_jerusalem())
+
+        if count == 0:
+            body = (
+                f"👋 <b>Job Agent Report</b> — {now_str}\n\n"
+                f"🔍 Query: <i>{html.escape(self.query)}</i>\n\n"
+                "📭 No new jobs found in this run.\n\n"
+                "Reply <b>db</b> to browse all DB jobs | <b>Done</b> to finish"
+            )
+        else:
+            companies = sorted({j.get("company", "?") for j in self.new_jobs if j.get("company")})
+            companies_str = ", ".join(html.escape(c) for c in companies)
+            body = (
+                f"👋 <b>Job Agent Report</b> — {now_str}\n\n"
+                f"🔍 Query: <i>{html.escape(self.query)}</i>\n"
+                f"📋 <b>{count} new job(s)</b> found:\n"
+                f"🏢 {companies_str}\n\n"
+                "Commands:\n"
+                "  <b>Next</b>  – review first job\n"
+                "  <b>db</b>    – browse all DB jobs\n"
+                "  <b>Done</b>  – finish for today"
+            )
+        self._send(body)
+        self._state = self.STATE_INTRO
+        if self.new_jobs:
+            self._state = self.STATE_BROWSING_NEW
+            # Pre-load first job so the user can reply Apply/Skip without Next
+            self._current_job = self.new_jobs[0]
+            self._send(self._job_card_text(self._current_job, 1, count))
+
+    # ------------------------------------------------------------------
+    # Main event loop
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        """Block until the session ends (user says Done or process is interrupted)."""
+        self.send_intro()
+
+        if self._state == self.STATE_DONE:
+            return
+
+        offset = 0
+        self.logger.info("Telegram session started, entering poll loop")
+
+        while True:
+            updates = self._get_updates(offset=offset, timeout=20)
+            for update in updates:
+                offset = update["update_id"] + 1
+                message = update.get("message", {})
+                # Only accept messages from our chat
+                if str(message.get("chat", {}).get("id", "")) != str(self.chat_id):
+                    continue
+                text = (message.get("text") or "").strip()
+                if not text:
+                    continue
+                self.logger.info(f"Telegram message received: {text!r}")
+                keep_going = self._handle_command(text)
+                if not keep_going:
+                    self.logger.info("Telegram session ended by user (Done)")
+                    return
+
+
+# ---------------------------------------------------------------------------
+# Telegram notify entry point – called after LinkedInJobAgent.run()
+# ---------------------------------------------------------------------------
+
+def run_telegram_notify(
+    new_jobs: List[Dict],
+    db: "ProcessedJobsDB",
+    query: str,
+    logger: logging.Logger,
+    bot_token: Optional[str] = None,
+    chat_id: Optional[int] = None,
+) -> None:
+    """
+    Start an interactive Telegram session.  Reads BOT_TOKEN and CHAT_ID from
+    environment variables if not provided.
+    """
+    token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    cid_raw = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+    if not token:
+        logger.error("Telegram notify: TELEGRAM_BOT_TOKEN not set. Skipping.")
+        print("❌ TELEGRAM_BOT_TOKEN not set. Set it as an environment variable.")
+        return
+    if not cid_raw:
+        logger.error("Telegram notify: TELEGRAM_CHAT_ID not set. Skipping.")
+        print("❌ TELEGRAM_CHAT_ID not set. Set it as an environment variable.")
+        return
+
+    try:
+        cid = int(cid_raw)
+    except ValueError:
+        logger.error(f"Telegram notify: TELEGRAM_CHAT_ID is not a valid integer: {cid_raw!r}")
+        print(f"❌ TELEGRAM_CHAT_ID must be a numeric chat ID, got: {cid_raw!r}")
+        return
+
+    session = TelegramJobSession(
+        bot_token=token,
+        chat_id=cid,
+        db=db,
+        new_jobs=new_jobs,
+        query=query,
+        logger=logger,
+    )
+    session.run()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1704,6 +2169,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="One-step mode: run scan once, then open report update page",
     )
+    parser.add_argument(
+        "--telegram-notify",
+        action="store_true",
+        help=(
+            "After scanning, start an interactive Telegram session. "
+            "Requires env vars TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID."
+        ),
+    )
+    parser.add_argument(
+        "--telegram-bot-token",
+        type=str,
+        default=None,
+        help="Telegram bot token (overrides TELEGRAM_BOT_TOKEN env var)",
+    )
+    parser.add_argument(
+        "--telegram-chat-id",
+        type=int,
+        default=None,
+        help="Telegram chat ID (overrides TELEGRAM_CHAT_ID env var)",
+    )
     return parser.parse_args()
 
 
@@ -1752,8 +2237,26 @@ def main() -> None:
         max_run_seconds=args.max_run_seconds,
         max_extract_seconds=args.max_extract_seconds,
         per_card_seconds=args.per_card_seconds,
+        keep_db_open=args.telegram_notify,
     )
     agent.run()
+
+    if args.telegram_notify:
+        # Build new-job list from DB records whose URLs match this run's report
+        reported_urls = {e["url"] for e in (agent.report_entries or [])}
+        all_db = agent.db.get_all_jobs()
+        new_job_dicts = [j for j in all_db if j.get("url") in reported_urls]
+        try:
+            run_telegram_notify(
+                new_jobs=new_job_dicts,
+                db=agent.db,
+                query=args.query,
+                logger=agent.logger,
+                bot_token=args.telegram_bot_token,
+                chat_id=args.telegram_chat_id,
+            )
+        finally:
+            agent.db.close()
 
 
 if __name__ == "__main__":
