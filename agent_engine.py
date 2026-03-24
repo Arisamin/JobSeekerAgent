@@ -1665,19 +1665,22 @@ class TelegramJobSession:
 
     States
     ------
-    INTRO          – intro message sent, waiting for first command
-    BROWSING_NEW   – iterating through new (this-run) jobs one by one
-    BROWSING_DB    – iterating through all DB jobs one by one
-    APPLYING       – "Apply" flow in progress for a specific job
-    DONE           – session terminated
+    INTRO           – intro message sent, waiting for first command
+    BROWSING_NEW    – iterating through new (this-run) jobs one by one
+    BROWSING_DB     – iterating through all DB jobs one by one
+    APPLYING        – Q&A form in progress (collecting answers for a job)
+    APPLY_CONFIRM   – summary shown, waiting for Submit or Cancel
+    DONE            – session terminated
 
     Commands (case-insensitive)
     ---------------------------
     next    – send next pending job; leave current at Discovered
-    apply   – mark current job Applied (and terminate any in-progress apply)
+    apply   – start application Q&A flow (collects data, then shows summary)
+    submit  – (after summary) fill & submit LinkedIn Easy Apply form; mark Applied only on success
     skip    – mark current job Skipped
     done    – terminate session (process exits)
     db      – switch to DB-browse mode; send jobs one by one
+    cancel  – abort an in-progress apply form or confirmation at any step
     cancel  – if an apply is in progress, cancel it; otherwise no-op with help text
     """
 
@@ -1688,7 +1691,30 @@ class TelegramJobSession:
     STATE_BROWSING_NEW = "BROWSING_NEW"
     STATE_BROWSING_DB = "BROWSING_DB"
     STATE_APPLYING = "APPLYING"
+    STATE_APPLY_CONFIRM = "APPLY_CONFIRM"  # waiting for Submit/Cancel after summary
     STATE_DONE = "DONE"
+
+    # ── Always-asked fixed fields (files + contact identity) ─────────────────
+    # These are asked regardless of what the form contains because we need them
+    # for every submission.  They are stored in the saved profile so repeat
+    # applications skip them automatically.
+    FIXED_FIELDS: List[Tuple[str, str]] = [
+        ("cv_path",           "📎 CV file path (full path to your PDF CV, e.g. C:\\Users\\you\\CV.pdf):"),
+        ("cover_letter_path", "📝 Cover letter file path (full path, or reply 'none' if not available):"),
+        ("full_name",         "✍️ Full name:"),
+        ("email",             "📧 Email:"),
+        ("phone",             "📱 Phone number:"),
+        ("location",          "📍 Current location (City, Country):"),
+        ("linkedin",          "🔗 LinkedIn profile URL:"),
+    ]
+
+    # ── Mapping: LinkedIn label text patterns → profile key ──────────────────
+    # Used during form scanning to recognise a field and match it to a saved
+    # profile value.  If a scanned label matches nothing here it becomes an
+    # "unknown" field and is asked verbatim from the user.
+    LABEL_TO_PROFILE_KEY: List[Tuple[Any, str]] = []  # populated after class body
+
+    PROFILE_FILENAME = "telegram_profile.json"
 
     def __init__(
         self,
@@ -1712,6 +1738,13 @@ class TelegramJobSession:
         self._db_job_idx: int = 0                   # cursor into _db_jobs
         self._current_job: Optional[Dict] = None    # job under review / being applied
         self._apply_in_progress_job_id: Optional[int] = None  # DB id of job being applied
+        self._apply_answers: Dict[str, str] = {}
+        self._apply_asked_field_keys: List[str] = []
+        self._apply_question_idx: int = 0
+        self._apply_form_fields: List[Tuple[str, str]] = []  # built dynamically per job
+        self._return_state_after_apply: str = self.STATE_INTRO
+        self._profile_path: Path = self.db.db_path.parent / self.PROFILE_FILENAME
+        self._saved_profile: Dict[str, str] = self._load_saved_profile()
 
     # ------------------------------------------------------------------
     # Low-level Telegram send helpers
@@ -1788,6 +1821,576 @@ class TelegramJobSession:
             self.logger.warning(f"Telegram getUpdates failed: {exc}")
             return []
 
+    def _load_saved_profile(self) -> Dict[str, str]:
+        """Load persisted profile answers for this chat, if available."""
+        try:
+            if not self._profile_path.exists():
+                return {}
+            root = json.loads(self._profile_path.read_text(encoding="utf-8"))
+            chat_profiles = root.get("chat_profiles", {}) if isinstance(root, dict) else {}
+            profile = chat_profiles.get(str(self.chat_id), {})
+            if isinstance(profile, dict):
+                return {str(k): str(v) for k, v in profile.items() if v is not None}
+        except Exception as exc:
+            self.logger.warning(f"Failed to load saved Telegram profile: {exc}")
+        return {}
+
+    def _persist_saved_profile(self) -> None:
+        """Persist current profile answers for this chat."""
+        try:
+            root: Dict[str, Any] = {}
+            if self._profile_path.exists():
+                try:
+                    loaded = json.loads(self._profile_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        root = loaded
+                except Exception:
+                    root = {}
+
+            chat_profiles = root.get("chat_profiles")
+            if not isinstance(chat_profiles, dict):
+                chat_profiles = {}
+            chat_profiles[str(self.chat_id)] = self._saved_profile
+            root["chat_profiles"] = chat_profiles
+            self._profile_path.write_text(json.dumps(root, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            self.logger.warning(f"Failed to persist Telegram profile: {exc}")
+
+    # ------------------------------------------------------------------
+    # Dynamic form-field discovery
+    # ------------------------------------------------------------------
+
+    def _scan_easy_apply_fields(self, job_url: str) -> List[Tuple[str, str, str]]:
+        """
+        Open the Easy Apply modal for *job_url* (without submitting), walk every
+        wizard step, and return a list of discovered fields:
+
+            [(field_key, label_text, field_type), ...]
+
+        field_type is one of: 'text', 'email', 'tel', 'textarea', 'radio',
+        'checkbox', 'select', 'file', 'unknown'.
+        field_key is either a known profile key (matched via LABEL_TO_PROFILE_KEY)
+        or a sanitised slug of the label text prefixed with 'custom__'.
+
+        Returns an empty list on any failure (caller falls back gracefully).
+        """
+        import os as _os
+        try:
+            sync_api = importlib.import_module("playwright.sync_api")
+            sync_playwright = getattr(sync_api, "sync_playwright")
+            target_closed_error = getattr(sync_api, "TargetClosedError", Exception)
+        except ImportError:
+            return []
+
+        local_app_data = _os.environ.get("LOCALAPPDATA", "")
+        primary_profile = _os.path.join(local_app_data, "Google", "Chrome", "User Data") if local_app_data else ""
+        fallback_profile = str(Path(__file__).parent / ".playwright_profile")
+
+        discovered: List[Tuple[str, str, str]] = []
+        seen_keys: set = set()
+
+        def _label_for(page: Any, inp: Any) -> str:
+            """Best-effort label text for a form element."""
+            for attr in ("aria-label",):
+                try:
+                    v = inp.get_attribute(attr, timeout=400)
+                    if v and v.strip():
+                        return v.strip()
+                except Exception:
+                    pass
+            try:
+                inp_id = inp.get_attribute("id", timeout=400) or ""
+                if inp_id:
+                    lbl = page.locator(f"label[for='{inp_id}']").first
+                    if lbl.count() > 0:
+                        t = lbl.inner_text(timeout=400)
+                        if t and t.strip():
+                            return t.strip()
+            except Exception:
+                pass
+            try:
+                t = inp.get_attribute("placeholder", timeout=400)
+                if t and t.strip():
+                    return t.strip()
+            except Exception:
+                pass
+            # Walk up to the nearest fieldset/div and grab its first text node
+            try:
+                ctx_text = (
+                    inp.locator("xpath=ancestor::*[self::fieldset or self::div][1]")
+                    .inner_text(timeout=400)
+                    .strip()
+                )
+                if ctx_text:
+                    return ctx_text.split("\n")[0].strip()
+            except Exception:
+                pass
+            return ""
+
+        def _profile_key_for(label: str) -> Optional[str]:
+            label_lower = label.lower()
+            for pattern, key in self.LABEL_TO_PROFILE_KEY:
+                if pattern.search(label_lower):
+                    return key
+            return None
+
+        def _slug(text: str) -> str:
+            """Sanitise label text into a safe dict key."""
+            return re.sub(r"[^a-z0-9_]", "_", text.lower().strip())[:60]
+
+        def _add(key: str, label: str, ftype: str) -> None:
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            discovered.append((key, label, ftype))
+
+        def _scan_step(page: Any) -> None:
+            # File inputs
+            for fi in page.locator("input[type='file']").all():
+                try:
+                    if not fi.is_visible(timeout=400):
+                        continue
+                    label = _label_for(page, fi)
+                    ll = label.lower()
+                    if "cover" in ll:
+                        _add("cover_letter_path", label or "Cover letter", "file")
+                    else:
+                        _add("cv_path", label or "Resume / CV", "file")
+                except Exception:
+                    pass
+
+            # Text / email / tel / textarea inputs
+            sel = "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], input[type='number'], textarea"
+            for inp in page.locator(sel).all():
+                try:
+                    if not inp.is_visible(timeout=400):
+                        continue
+                    label = _label_for(page, inp)
+                    if not label:
+                        continue
+                    try:
+                        ftype = inp.get_attribute("type", timeout=400) or "text"
+                    except Exception:
+                        ftype = "text"
+                    if inp.evaluate("el => el.tagName").lower() == "textarea":
+                        ftype = "textarea"
+                    pk = _profile_key_for(label)
+                    key = pk if pk else f"custom__{_slug(label)}"
+                    _add(key, label, ftype)
+                except Exception:
+                    pass
+
+            # Select dropdowns
+            for sel_el in page.locator("select").all():
+                try:
+                    if not sel_el.is_visible(timeout=400):
+                        continue
+                    label = _label_for(page, sel_el)
+                    if not label:
+                        continue
+                    pk = _profile_key_for(label)
+                    key = pk if pk else f"custom__{_slug(label)}"
+                    _add(key, label, "select")
+                except Exception:
+                    pass
+
+            # Radio/checkbox groups — grab question from fieldset legend
+            for fieldset in page.locator("fieldset").all():
+                try:
+                    if not fieldset.is_visible(timeout=400):
+                        continue
+                    legend = ""
+                    try:
+                        legend = fieldset.locator("legend").first.inner_text(timeout=400).strip()
+                    except Exception:
+                        pass
+                    if not legend:
+                        try:
+                            legend = fieldset.inner_text(timeout=400).split("\n")[0].strip()
+                        except Exception:
+                            pass
+                    if not legend:
+                        continue
+                    # Determine type from first input inside
+                    first_inp = fieldset.locator("input").first
+                    ftype = "radio"
+                    try:
+                        ftype = first_inp.get_attribute("type", timeout=400) or "radio"
+                    except Exception:
+                        pass
+                    pk = _profile_key_for(legend)
+                    key = pk if pk else f"custom__{_slug(legend)}"
+                    _add(key, legend, ftype)
+                except Exception:
+                    pass
+
+        def _prefill_required_for_scan(page: Any) -> None:
+            """
+            Best-effort prefill so scanner can pass required step validation and
+            discover later wizard pages. Uses harmless placeholder values and
+            never reaches Submit (loop breaks before submit click).
+            """
+            # Fill empty text-like controls
+            text_like = "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], input[type='number'], textarea"
+            for inp in page.locator(text_like).all():
+                try:
+                    if not inp.is_visible(timeout=300):
+                        continue
+                    cur = (inp.input_value(timeout=300) or "").strip()
+                    if cur:
+                        continue
+                    label = _label_for(page, inp).lower()
+                    fill = "test"
+                    if "email" in label:
+                        fill = "test@example.com"
+                    elif "phone" in label or "mobile" in label:
+                        fill = "0500000000"
+                    elif "linkedin" in label:
+                        fill = self._saved_profile.get("linkedin") or "https://www.linkedin.com/in/test"
+                    elif "github" in label:
+                        fill = self._saved_profile.get("github") or "No"
+                    elif "website" in label or "blog" in label:
+                        fill = self._saved_profile.get("website") or "No"
+                    elif "year" in label and "experience" in label:
+                        fill = self._saved_profile.get("experience_years") or "5"
+                    elif "salary" in label or "compensation" in label:
+                        fill = self._saved_profile.get("salary_expectation") or "30000"
+                    elif "notice" in label or "availability" in label:
+                        fill = self._saved_profile.get("notice_period") or "1 month"
+                    elif "first" in label and "name" in label:
+                        fill = (self._saved_profile.get("full_name") or "Test User").split()[0]
+                    elif "last" in label and "name" in label:
+                        full = (self._saved_profile.get("full_name") or "Test User").split()
+                        fill = full[-1] if len(full) > 1 else full[0]
+                    elif "name" in label:
+                        fill = self._saved_profile.get("full_name") or "Test User"
+                    elif "location" in label or "city" in label:
+                        fill = self._saved_profile.get("location") or "Tel Aviv"
+                    inp.fill(fill, timeout=1000)
+                except Exception:
+                    continue
+
+            # Select first non-empty option for required selects
+            for sel_el in page.locator("select").all():
+                try:
+                    if not sel_el.is_visible(timeout=300):
+                        continue
+                    options = sel_el.locator("option").all()
+                    picked = False
+                    for opt in options:
+                        try:
+                            value = (opt.get_attribute("value", timeout=300) or "").strip()
+                            text = (opt.inner_text(timeout=300) or "").strip().lower()
+                            if not value:
+                                continue
+                            if text in {"select", "choose", "please select"}:
+                                continue
+                            sel_el.select_option(value=value)
+                            picked = True
+                            break
+                        except Exception:
+                            continue
+                    if not picked and options:
+                        try:
+                            fallback_value = (options[-1].get_attribute("value", timeout=300) or "").strip()
+                            if fallback_value:
+                                sel_el.select_option(value=fallback_value)
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+
+            # For each radio group, select first visible option if none selected
+            for fieldset in page.locator("fieldset").all():
+                try:
+                    radios = fieldset.locator("input[type='radio']")
+                    if radios.count() == 0:
+                        continue
+                    already_selected = False
+                    for idx in range(radios.count()):
+                        try:
+                            r = radios.nth(idx)
+                            if r.is_checked(timeout=200):
+                                already_selected = True
+                                break
+                        except Exception:
+                            continue
+                    if already_selected:
+                        continue
+                    for idx in range(radios.count()):
+                        try:
+                            r = radios.nth(idx)
+                            if not r.is_visible(timeout=200):
+                                continue
+                            try:
+                                r.check(timeout=800)
+                            except Exception:
+                                r.click(timeout=800)
+                            break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+        try:
+            with sync_playwright() as pw:
+                try:
+                    ctx = pw.chromium.launch_persistent_context(
+                        user_data_dir=primary_profile,
+                        channel="chrome",
+                        headless=False,
+                        viewport={"width": 1440, "height": 900},
+                        slow_mo=100,
+                    )
+                except (target_closed_error, Exception) as exc:
+                    self.logger.warning(f"Scan: primary profile failed ({exc}), using fallback")
+                    _os.makedirs(fallback_profile, exist_ok=True)
+                    ctx = pw.chromium.launch_persistent_context(
+                        user_data_dir=fallback_profile,
+                        channel="chrome",
+                        headless=False,
+                        viewport={"width": 1440, "height": 900},
+                        slow_mo=100,
+                    )
+                try:
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                    page.set_default_timeout(20000)
+                    page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(2000)
+
+                    # Click Easy Apply (same robustness as submit flow)
+                    clicked = False
+                    for sel in [
+                        "button.jobs-apply-button",
+                        "button:has-text('Easy Apply')",
+                        "button[aria-label*='Easy Apply']",
+                        ".jobs-s-apply button",
+                    ]:
+                        try:
+                            btn = page.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible(timeout=3000):
+                                btn.click(timeout=5000)
+                                clicked = True
+                                self.logger.info(f"Scan: clicked Easy Apply via selector {sel!r}")
+                                break
+                        except Exception:
+                            continue
+
+                    if not clicked:
+                        self.logger.info("Scan: Easy Apply button not found – returning empty scan")
+                        return []
+
+                    page.wait_for_timeout(2000)
+
+                    # Walk wizard steps (scan only – never submit)
+                    max_steps = 10
+                    for _step in range(max_steps):
+                        page.wait_for_timeout(800)
+                        _scan_step(page)
+                        _prefill_required_for_scan(page)
+
+                        # Find advance button
+                        advance = None
+                        for sel in [
+                            "button[aria-label*='Continue to next step']",
+                            "button:has-text('Next')",
+                            "button:has-text('Continue')",
+                            "button[aria-label*='Review']",
+                            "button:has-text('Review')",
+                            ".artdeco-modal button.artdeco-button--primary",
+                            ".jobs-easy-apply-modal button.artdeco-button--primary",
+                        ]:
+                            try:
+                                b = page.locator(sel).last
+                                if b.count() > 0 and b.is_visible(timeout=1000) and b.is_enabled(timeout=1000):
+                                    advance = b
+                                    break
+                            except Exception:
+                                continue
+
+                        if advance is None:
+                            break
+                        btn_text = (advance.inner_text(timeout=2000) or "").strip().lower()
+                        # Stop before Submit – we don't want to actually submit
+                        if "submit" in btn_text:
+                            break
+                        advance.click(timeout=5000)
+                        page.wait_for_timeout(1200)
+
+                    # Close modal / dismiss
+                    for dismiss_sel in [
+                        "button[aria-label*='Dismiss']",
+                        "button[aria-label*='Close']",
+                        ".artdeco-modal__dismiss",
+                    ]:
+                        try:
+                            d = page.locator(dismiss_sel).first
+                            if d.count() > 0 and d.is_visible(timeout=1000):
+                                d.click(timeout=3000)
+                                break
+                        except Exception:
+                            continue
+
+                finally:
+                    try:
+                        ctx.close()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            self.logger.warning(f"Easy Apply scan failed: {exc}")
+
+        self.logger.info(f"Easy Apply scan: found {len(discovered)} field(s): {[k for k,_,_ in discovered]}")
+        return discovered
+
+    # ------------------------------------------------------------------
+    # Per-job apply field list builder
+    # ------------------------------------------------------------------
+
+    def _build_apply_form_fields(self, scanned: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:
+        """
+        Merge scan results with FIXED_FIELDS to build the per-job
+        _apply_form_fields list as (key, telegram_prompt) tuples.
+
+        Logic:
+        - Always start with FIXED_FIELDS (cv, cover letter, identity).
+        - Append any extra fields found in the scan that are NOT already in
+          FIXED_FIELDS, preserving scan order.
+        - Unknown custom__ fields get a verbatim question prompt.
+        """
+        result: List[Tuple[str, str]] = list(self.FIXED_FIELDS)
+        fixed_keys = {k for k, _ in self.FIXED_FIELDS}
+
+        for key, label, ftype in scanned:
+            if key in fixed_keys:
+                continue  # already covered
+            # Build a prompt from the label and field type
+            if ftype in {"radio", "checkbox"}:
+                prompt = f"❓ {label} (type your answer):"
+            elif ftype == "select":
+                prompt = f"🔽 {label} (type your choice):"
+            elif ftype == "file":
+                continue  # file inputs are handled by FIXED_FIELDS
+            else:
+                prompt = f"✏️ {label}:"
+            result.append((key, prompt))
+            fixed_keys.add(key)
+
+        return result
+
+    def _first_missing_apply_field_idx(self) -> int:
+        for index, (field_key, _prompt) in enumerate(self._apply_form_fields):
+            if not self._apply_answers.get(field_key):
+                return index
+        return len(self._apply_form_fields)
+
+    def _send_current_apply_prompt(self) -> None:
+        if self._apply_question_idx >= len(self._apply_form_fields):
+            return
+        key, prompt = self._apply_form_fields[self._apply_question_idx]
+        if key not in self._apply_asked_field_keys:
+            self._apply_asked_field_keys.append(key)
+        self._send(prompt)
+
+    def _validate_apply_answer(self, field_key: str, raw_answer: str) -> Tuple[bool, str, str]:
+        """Validate one Q&A answer. Returns (is_valid, error_message, normalized_answer)."""
+        answer = raw_answer.strip().strip('"').strip("'")
+        if not answer:
+            return False, "⚠️ Empty answer. Please provide a value.", ""
+
+        if field_key == "cv_path":
+            candidate = Path(answer)
+            if not candidate.exists() or not candidate.is_file():
+                return False, "⚠️ CV file path not found. Please send a valid existing file path.", ""
+            return True, "", str(candidate)
+
+        if field_key == "cover_letter_path":
+            lowered = answer.lower().strip()
+            if lowered in {"none", "skip", "n/a", "na"}:
+                return True, "", ""
+            candidate = Path(answer)
+            if not candidate.exists() or not candidate.is_file():
+                return False, "⚠️ Cover letter file path not found. Send a valid path, or reply 'none'.", ""
+            return True, "", str(candidate)
+
+        if field_key == "full_name":
+            if len(answer) < 3 or len(answer.split()) < 2:
+                return False, "⚠️ Please provide first and last name.", ""
+            return True, "", answer
+
+        if field_key == "email":
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", answer):
+                return False, "⚠️ Invalid email format. Example: name@example.com", ""
+            return True, "", answer
+
+        if field_key == "phone":
+            digits = re.sub(r"\D", "", answer)
+            if len(digits) < 7 or len(digits) > 15:
+                return False, "⚠️ Invalid phone number. Please send a valid phone number.", ""
+            return True, "", answer
+
+        if field_key == "location":
+            if len(answer) < 2:
+                return False, "⚠️ Location looks too short. Please send City, Country.", ""
+            return True, "", answer
+
+        if field_key == "linkedin":
+            lowered = answer.lower()
+            if "linkedin.com/" not in lowered:
+                return False, "⚠️ Please send a valid LinkedIn URL.", ""
+            return True, "", answer
+
+        if field_key == "github":
+            lowered = answer.lower().strip()
+            if lowered in {"none", "skip", "n/a", "na"}:
+                return True, "", ""
+            if "github.com/" not in lowered:
+                return False, "⚠️ Please send a valid GitHub URL, or reply 'none'.", ""
+            return True, "", answer
+
+        if field_key == "website":
+            lowered = answer.lower().strip()
+            if lowered in {"none", "skip", "n/a", "na"}:
+                return True, "", ""
+            if not re.match(r"^https?://", lowered):
+                return False, "⚠️ Website URL should start with http:// or https://, or reply 'none'.", ""
+            return True, "", answer
+
+        if field_key in {"relocate_bangkok", "agoda_relationship"}:
+            lowered = answer.lower().strip()
+            yes_values = {"yes", "y", "true", "1"}
+            no_values = {"no", "n", "false", "0"}
+            if lowered in yes_values:
+                return True, "", "yes"
+            if lowered in no_values:
+                return True, "", "no"
+            return False, "⚠️ Please answer with yes or no.", ""
+
+        if field_key == "experience_years":
+            match = re.search(r"\d{1,3}", answer)
+            if not match:
+                return False, "⚠️ Invalid experience. Please provide years as a number (e.g. 10).", ""
+            years = int(match.group(0))
+            if years < 0 or years > 60:
+                return False, "⚠️ Experience years must be between 0 and 60.", ""
+            return True, "", str(years)
+
+        if field_key == "notice_period":
+            if len(answer) < 2:
+                return False, "⚠️ Please provide notice period / availability.", ""
+            return True, "", answer
+
+        if field_key == "salary_expectation":
+            if len(answer) < 2:
+                return False, "⚠️ Please provide salary expectation.", ""
+            return True, "", answer
+
+        if field_key == "motivation":
+            if len(answer) < 8:
+                return False, "⚠️ Motivation text is too short. Please provide 1-2 meaningful lines.", ""
+            return True, "", answer
+
+        return True, "", answer
+
     # ------------------------------------------------------------------
     # Job card helpers
     # ------------------------------------------------------------------
@@ -1832,25 +2435,45 @@ class TelegramJobSession:
         continue, False if it should terminate (Done).
         """
         cmd = raw.strip().lower()
+        abort_aliases = {"cancel", "quit", "abort", "stop", "give up", "giveup"}
 
         # --- In-progress apply guard -----------------------------------------
         if self._apply_in_progress_job_id is not None:
-            if cmd == "cancel":
+            if cmd in abort_aliases:
                 return self._cmd_cancel_apply()
-            # Any unrecognised message while apply is in progress
-            jid = self._apply_in_progress_job_id
-            self._send(
-                f"⚠️ Job application for job ID <code>{jid}</code> is still in progress.\n"
-                "Reply <b>Cancel</b> to abort it."
-            )
-            return True
+
+            # Waiting for Submit/Cancel confirmation after summary
+            if self._state == self.STATE_APPLY_CONFIRM:
+                if cmd == "submit":
+                    return self._cmd_submit_apply()
+                jid = self._apply_in_progress_job_id
+                self._send(
+                    f"⚠️ Review the summary above and reply <b>Submit</b> to proceed or <b>Cancel</b> to abort."
+                )
+                return True
+
+            # Still in Q&A phase — block navigation commands
+            if cmd in {"next", "apply", "skip", "db", "done", "submit"}:
+                jid = self._apply_in_progress_job_id
+                self._send(
+                    f"⚠️ Job application for job ID <code>{jid}</code> is still in progress.\n"
+                    "Reply with the current question answer, or <b>Cancel</b>/<b>Quit</b> to abort."
+                )
+                return True
+
+            return self._handle_apply_answer(raw.strip())
 
         # --- Global commands -------------------------------------------------
         if cmd == "done":
             return self._cmd_done()
         if cmd == "db":
             return self._cmd_db()
-        if cmd == "cancel":
+        if cmd in {"reset profile", "resetprofile"}:
+            self._saved_profile = {}
+            self._persist_saved_profile()
+            self._send("🧹 Saved profile was cleared. Future Apply flows will ask all fields again.")
+            return True
+        if cmd in abort_aliases:
             self._send("ℹ️ No application is currently in progress.")
             return True
 
@@ -1869,7 +2492,7 @@ class TelegramJobSession:
         # Unrecognised
         self._send(
             "❓ Unknown command.\n"
-            "Available: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b> | <b>db</b> | <b>Cancel</b>"
+            "Available: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b> | <b>db</b> | <b>Cancel</b>/<b>Quit</b>"
         )
         return True
 
@@ -1929,26 +2552,79 @@ class TelegramJobSession:
         if self._current_job is None:
             self._send("⚠️ No active job selected. Reply <b>Next</b> to get the first job.")
             return True
-        job_id = self._current_job.get("id")
-        title  = self._current_job.get("title", "?")
+
+        title   = self._current_job.get("title", "?")
         company = self._current_job.get("company", "?")
-        try:
-            self.db.update_job_status(job_id, "Applied")
-            self.logger.info(f"Telegram: Applied -> {title} @ {company} (id={job_id})")
-        except Exception as exc:
-            self._send(f"❌ DB update failed: {html.escape(str(exc))}")
-            return True
+        job_url = self._current_job.get("url", "")
+
+        # ── Scan the actual form before asking anything ───────────────────────
         self._send(
-            f"✅ Marked <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b> as <b>Applied</b>.\n\n"
-            "Reply <b>Next</b> to continue | <b>Done</b> to finish | <b>db</b> to browse DB"
+            f"🔍 Scanning the Easy Apply form for <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>…\n"
+            "This opens a browser briefly. I'll ask only the questions the form actually needs."
         )
-        # Advance cursor so next "Next" shows the following job
-        if self._state == self.STATE_BROWSING_NEW:
-            self._new_job_idx += 1
-            self._current_job = self.new_jobs[self._new_job_idx] if self._new_job_idx < len(self.new_jobs) else None
-        elif self._state == self.STATE_BROWSING_DB:
-            self._db_job_idx += 1
-            self._current_job = self._db_jobs[self._db_job_idx] if self._db_job_idx < len(self._db_jobs) else None
+        try:
+            scanned = self._scan_easy_apply_fields(job_url)
+        except Exception as exc:
+            self.logger.warning(f"Scan raised unexpectedly: {exc}")
+            scanned = []
+
+        # Fallback: if scan fails for known Agoda flow, inject known required
+        # additional questions so summary and Q&A still match the real form.
+        if not scanned:
+            company_l = (company or "").lower()
+            title_l = (title or "").lower()
+            url_l = (job_url or "").lower()
+            if "agoda" in company_l or "agoda" in title_l or "agoda" in url_l:
+                scanned = [
+                    ("github", "Github Profile? (Please paste link or answer 'No')", "text"),
+                    ("website", "Website / blog / other", "text"),
+                    ("relocate_bangkok", "Are you currently based in Bangkok or open to relocate to Bangkok?", "radio"),
+                    ("agoda_relationship", "Do you as a candidate have a personal relationship with a current Agoda employee?", "radio"),
+                ]
+                self.logger.info("Scan fallback: injected Agoda additional questions")
+
+        self._apply_form_fields = self._build_apply_form_fields(scanned)
+        n_extra = len(self._apply_form_fields) - len(self.FIXED_FIELDS)
+        if scanned:
+            extra_labels = [label for key, label, _ in scanned if key not in {k for k, _ in self.FIXED_FIELDS}]
+            if extra_labels:
+                self._send(
+                    f"✅ Form scanned. Found <b>{n_extra}</b> job-specific question(s):\n"
+                    + "\n".join(f"  • {html.escape(l)}" for l in extra_labels)
+                )
+            else:
+                self._send("✅ Form scanned. No extra questions beyond the standard fields.")
+        else:
+            self._send("⚠️ Could not scan the form (job may not use Easy Apply, or login needed). "
+                       "I'll ask standard fields only.")
+
+        # ── Initialise apply state ────────────────────────────────────────────
+        self._return_state_after_apply = self._state
+        self._state = self.STATE_APPLYING
+        self._apply_answers = {
+            field_key: self._saved_profile.get(field_key, "")
+            for field_key, _prompt in self._apply_form_fields
+            if self._saved_profile.get(field_key)
+        }
+        self._apply_asked_field_keys = []
+        self._apply_question_idx = self._first_missing_apply_field_idx()
+        self._apply_in_progress_job_id = self._current_job.get("id")
+
+        loaded_count = len(self._apply_answers)
+        self._send(
+            f"🧾 Starting application form for <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>.\n"
+            "Reply with each answer. Use <b>Cancel</b> or <b>Quit</b> anytime to abort."
+        )
+        if loaded_count > 0:
+            self._send(
+                f"💾 Loaded <b>{loaded_count}</b> saved profile field(s), so I'll ask only missing details.\n"
+                "Reply <b>reset profile</b> anytime (outside apply flow) to clear saved values."
+            )
+
+        if self._apply_question_idx >= len(self._apply_form_fields):
+            return self._show_apply_summary()
+
+        self._send_current_apply_prompt()
         return True
 
     def _cmd_skip(self) -> bool:
@@ -1979,12 +2655,494 @@ class TelegramJobSession:
     def _cmd_cancel_apply(self) -> bool:
         jid = self._apply_in_progress_job_id
         self._apply_in_progress_job_id = None
-        self._state = self.STATE_BROWSING_NEW if self.new_jobs else self.STATE_INTRO
+        self._apply_answers = {}
+        self._apply_asked_field_keys = []
+        self._apply_question_idx = 0
+        self._apply_form_fields = []
+        self._state = self._return_state_after_apply
         self._send(
             f"🚫 Application for job ID <code>{jid}</code> cancelled.\n\n"
             "Reply <b>Next</b> | <b>Done</b> | <b>db</b>"
         )
         return True
+
+    def _handle_apply_answer(self, answer: str) -> bool:
+        if not answer:
+            self._send("⚠️ Empty answer. Please send a value or <b>Cancel</b>.")
+            return True
+
+        if self._apply_question_idx >= len(self._apply_form_fields):
+            return self._show_apply_summary()
+
+        key, _prompt = self._apply_form_fields[self._apply_question_idx]
+        is_valid, error_message, normalized_answer = self._validate_apply_answer(key, answer)
+        if not is_valid:
+            self._send(error_message)
+            self._send_current_apply_prompt()
+            return True
+
+        self._apply_answers[key] = normalized_answer
+        # Only persist non-custom fields to saved profile
+        if not key.startswith("custom__"):
+            self._saved_profile[key] = normalized_answer
+            self._persist_saved_profile()
+        self._apply_question_idx += 1
+
+        while self._apply_question_idx < len(self._apply_form_fields):
+            next_key, _next_prompt = self._apply_form_fields[self._apply_question_idx]
+            if self._apply_answers.get(next_key):
+                self._apply_question_idx += 1
+                continue
+            break
+
+        if self._apply_question_idx < len(self._apply_form_fields):
+            self._send_current_apply_prompt()
+            return True
+
+        return self._show_apply_summary()
+
+    def _show_apply_summary(self) -> bool:
+        """All Q&A answers collected. Show summary and ask user to Submit or Cancel."""
+        job = self._current_job or {}
+        title = job.get("title", "?")
+        company = job.get("company", "?")
+        url = job.get("url", "")
+
+        submission_lines: List[str] = []
+        for field_key, prompt in self._apply_form_fields:
+            value = (self._apply_answers.get(field_key) or "").strip()
+            include_empty_for_asked = (field_key in self._apply_asked_field_keys)
+            if not value and not include_empty_for_asked:
+                continue
+
+            # Build a clean display label from the prompt
+            label = prompt.split(" ", 1)[1].rstrip(":") if " " in prompt else prompt.rstrip(":")
+            label = label.split(" (", 1)[0].strip()
+            display_value = value or "(not provided)"
+            submission_lines.append(f"• <b>{html.escape(label)}</b>: {html.escape(display_value)}")
+
+        submission_section = "\n🧾 <b>Data that will be submitted in this application:</b>\n"
+        if submission_lines:
+            submission_section += "\n".join(submission_lines)
+        else:
+            submission_section += "• <i>No values are currently available for submission.</i>"
+
+        self._send(
+            f"📋 <b>Application Summary</b>\n"
+            f"Role: <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>\n"
+            f"🔗 {html.escape(url)}\n\n"
+            + submission_section
+            + "\n\n"
+            "Reply <b>Submit</b> to fill &amp; submit the form on LinkedIn, "
+            "or <b>Cancel</b> to abort."
+        )
+        self._state = self.STATE_APPLY_CONFIRM
+        return True
+
+    def _cmd_submit_apply(self) -> bool:
+        """User confirmed Submit. Run Playwright to fill and submit the LinkedIn Easy Apply form."""
+        job = self._current_job or {}
+        job_id = job.get("id")
+        title = job.get("title", "?")
+        company = job.get("company", "?")
+        job_url = job.get("url", "")
+        answers = self._apply_answers
+
+        self._send(f"⏳ Opening LinkedIn and submitting your application for <b>{html.escape(title)}</b>…")
+        self.logger.info(f"Telegram: Starting LinkedIn Easy Apply for job {job_id} ({title} @ {company})")
+
+        success, message = self._do_linkedin_easy_apply(job_url, answers)
+
+        if success:
+            try:
+                self.db.update_job_status(job_id, "Applied")
+                self.logger.info(f"Telegram: Applied -> {title} @ {company} (id={job_id})")
+            except Exception as exc:
+                self._send(f"⚠️ Submission succeeded but DB update failed: {html.escape(str(exc))}")
+            self._send(
+                f"✅ <b>Application submitted successfully!</b>\n"
+                f"Role: <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>\n"
+                f"Status set to <b>Applied</b>.\n\n"
+                "Reply <b>Next</b> to continue | <b>Done</b> to finish | <b>db</b> to browse DB"
+            )
+        else:
+            self._send(
+                f"❌ <b>Submission failed.</b>\n"
+                f"{html.escape(message)}\n\n"
+                "Status has <b>not</b> been changed. You can try again or apply manually.\n"
+                "Reply <b>Cancel</b> to abort this application | <b>Submit</b> to retry."
+            )
+            # Stay in APPLY_CONFIRM so user can retry or cancel
+            return True
+
+        # Reset apply state
+        self._apply_in_progress_job_id = None
+        self._apply_question_idx = 0
+        self._apply_answers = {}
+        self._apply_asked_field_keys = []
+        self._apply_form_fields = []
+        self._state = self._return_state_after_apply
+        return True
+
+    def _do_linkedin_easy_apply(self, job_url: str, answers: Dict[str, str]) -> Tuple[bool, str]:
+        """
+        Open the LinkedIn job page, click Easy Apply, fill out the modal form
+        using the collected answers, and submit.
+
+        Returns (success: bool, message: str).
+        """
+        import os as _os
+        try:
+            sync_api = importlib.import_module("playwright.sync_api")
+            sync_playwright = getattr(sync_api, "sync_playwright")
+            target_closed_error = getattr(sync_api, "TargetClosedError", Exception)
+        except ImportError as exc:
+            return False, f"Playwright not available: {exc}"
+
+        # Resolve Chrome profile (same logic as LinkedInJobAgent.run)
+        local_app_data = _os.environ.get("LOCALAPPDATA", "")
+        primary_profile = _os.path.join(local_app_data, "Google", "Chrome", "User Data") if local_app_data else ""
+        fallback_profile = str(Path(__file__).parent / ".playwright_profile")
+
+        cv_path = answers.get("cv_path", "").strip()
+
+        try:
+            with sync_playwright() as pw:
+                # Try primary profile first, fall back to local
+                try:
+                    ctx = pw.chromium.launch_persistent_context(
+                        user_data_dir=primary_profile,
+                        channel="chrome",
+                        headless=False,  # Show browser so user can handle captchas/MFA
+                        viewport={"width": 1440, "height": 900},
+                        slow_mo=150,
+                    )
+                except (target_closed_error, Exception) as exc:
+                    self.logger.warning(f"LinkedIn Easy Apply: primary profile failed ({exc}), using fallback")
+                    _os.makedirs(fallback_profile, exist_ok=True)
+                    ctx = pw.chromium.launch_persistent_context(
+                        user_data_dir=fallback_profile,
+                        channel="chrome",
+                        headless=False,
+                        viewport={"width": 1440, "height": 900},
+                        slow_mo=150,
+                    )
+
+                try:
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                    page.set_default_timeout(20000)
+
+                    # ── Step 1: Navigate to job page ──────────────────────────────
+                    self.logger.info(f"Easy Apply: navigating to {job_url}")
+                    page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(2000)
+
+                    # ── Step 2: Click Easy Apply button ───────────────────────────
+                    easy_apply_selectors = [
+                        "button.jobs-apply-button",
+                        "button:has-text('Easy Apply')",
+                        "button[aria-label*='Easy Apply']",
+                        ".jobs-s-apply button",
+                    ]
+                    clicked = False
+                    for sel in easy_apply_selectors:
+                        try:
+                            btn = page.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible(timeout=3000):
+                                btn.click(timeout=5000)
+                                clicked = True
+                                self.logger.info("Easy Apply: clicked Easy Apply button")
+                                break
+                        except Exception:
+                            continue
+
+                    if not clicked:
+                        # Check if it's an external application
+                        ext_btn = page.locator("button:has-text('Apply'), a:has-text('Apply on company site')").first
+                        if ext_btn.count() > 0:
+                            return False, (
+                                "This job uses an external application page (not LinkedIn Easy Apply). "
+                                "Please apply manually via the job URL."
+                            )
+                        return False, "Could not find the Easy Apply button. The page may have changed or you may need to log in."
+
+                    page.wait_for_timeout(2000)  # modal animation
+
+                    # ── Step 3: Fill the modal form ───────────────────────────────
+                    # The Easy Apply modal is a multi-step wizard. We iterate pages.
+                    max_modal_steps = 10
+                    for step_num in range(max_modal_steps):
+                        self.logger.info(f"Easy Apply: filling modal step {step_num + 1}")
+                        page.wait_for_timeout(1000)
+
+                        # Fill text inputs that are visible and empty
+                        self._fill_easy_apply_modal(page, answers, cv_path)
+
+                        # Look for Next / Review / Submit button
+                        next_btn = self._find_modal_advance_button(page)
+                        if next_btn is None:
+                            return False, f"Lost the Easy Apply modal at step {step_num + 1}."
+
+                        btn_text = (next_btn.inner_text(timeout=3000) or "").strip().lower()
+                        self.logger.info(f"Easy Apply: modal button text = {btn_text!r}")
+
+                        if "submit" in btn_text:
+                            next_btn.click(timeout=10000)
+                            self.logger.info("Easy Apply: clicked Submit button")
+                            page.wait_for_timeout(3000)
+                            # Check for success indicators
+                            success_indicators = [
+                                "text=/application submitted/i",
+                                "text=/your application was sent/i",
+                                "text=/successfully applied/i",
+                                ".artdeco-modal:has-text('application submitted')",
+                                "h3:has-text('Application submitted')",
+                            ]
+                            submitted = False
+                            for ind in success_indicators:
+                                try:
+                                    if page.locator(ind).count() > 0:
+                                        submitted = True
+                                        break
+                                except Exception:
+                                    pass
+                            if submitted:
+                                self.logger.info("Easy Apply: submission confirmed")
+                                return True, "Application submitted successfully."
+                            # If no explicit confirmation, treat as success (LinkedIn sometimes
+                            # closes the modal without a visible banner)
+                            self.logger.info("Easy Apply: modal closed after Submit – treating as success")
+                            return True, "Application submitted (modal closed after Submit)."
+
+                        elif "next" in btn_text or "review" in btn_text or "continue" in btn_text:
+                            next_btn.click(timeout=5000)
+                        else:
+                            # Unknown button — click it and hope for the best
+                            next_btn.click(timeout=5000)
+
+                    return False, f"Easy Apply wizard exceeded {max_modal_steps} steps without submitting."
+
+                finally:
+                    try:
+                        ctx.close()
+                    except Exception:
+                        pass
+
+        except Exception as exc:
+            self.logger.error(f"Easy Apply unexpected error: {exc}")
+            return False, f"Unexpected error during submission: {exc}"
+
+    def _fill_easy_apply_modal(self, page: Any, answers: Dict[str, str], cv_path: str) -> None:
+        """Fill visible fields in the current Easy Apply modal step using dynamic label matching."""
+        try:
+            cover_letter_path = (answers.get("cover_letter_path") or "").strip()
+
+            def _get_label(inp: Any) -> str:
+                try:
+                    aria = inp.get_attribute("aria-label", timeout=400) or ""
+                    if aria.strip():
+                        return aria.strip()
+                except Exception:
+                    pass
+                try:
+                    inp_id = inp.get_attribute("id", timeout=400) or ""
+                    if inp_id:
+                        lbl = page.locator(f"label[for='{inp_id}']").first
+                        if lbl.count() > 0:
+                            text = lbl.inner_text(timeout=400) or ""
+                            if text.strip():
+                                return text.strip()
+                except Exception:
+                    pass
+                try:
+                    placeholder = inp.get_attribute("placeholder", timeout=400) or ""
+                    if placeholder.strip():
+                        return placeholder.strip()
+                except Exception:
+                    pass
+                return ""
+
+            def _custom_key_from_label(label: str) -> str:
+                return f"custom__{re.sub(r'[^a-z0-9_]', '_', label.lower().strip())[:60]}"
+
+            def _answer_for_label(label: str) -> str:
+                lowered = label.lower()
+                for pattern, key in self.LABEL_TO_PROFILE_KEY:
+                    if pattern.search(lowered):
+                        return answers.get(key, "")
+                return answers.get(_custom_key_from_label(label), "")
+
+            for fi in page.locator("input[type='file']").all():
+                try:
+                    if not fi.is_visible(timeout=1000):
+                        continue
+                    label_context = ""
+                    try:
+                        label_context = (
+                            fi.locator("xpath=ancestor::*[self::div or self::section][1]").inner_text(timeout=500) or ""
+                        ).lower()
+                    except Exception:
+                        pass
+
+                    if "cover" in label_context and cover_letter_path and Path(cover_letter_path).exists():
+                        fi.set_input_files(cover_letter_path)
+                        self.logger.info("Easy Apply: uploaded cover letter")
+                        page.wait_for_timeout(500)
+                        continue
+
+                    if ("resume" in label_context or "cv" in label_context) and cv_path and Path(cv_path).exists():
+                        fi.set_input_files(cv_path)
+                        self.logger.info("Easy Apply: uploaded CV")
+                        page.wait_for_timeout(500)
+                        continue
+
+                    current_files = ""
+                    try:
+                        current_files = fi.input_value(timeout=500) or ""
+                    except Exception:
+                        pass
+
+                    if not current_files and cv_path and Path(cv_path).exists():
+                        fi.set_input_files(cv_path)
+                        self.logger.info("Easy Apply: uploaded CV (fallback)")
+                        page.wait_for_timeout(500)
+                        cv_path = ""
+                    elif not current_files and cover_letter_path and Path(cover_letter_path).exists():
+                        fi.set_input_files(cover_letter_path)
+                        self.logger.info("Easy Apply: uploaded cover letter (fallback)")
+                        page.wait_for_timeout(500)
+                        cover_letter_path = ""
+                except Exception:
+                    continue
+
+            text_like_selector = "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], input[type='number'], textarea"
+            for inp in page.locator(text_like_selector).all():
+                try:
+                    if not inp.is_visible(timeout=500):
+                        continue
+                    current_val = inp.input_value(timeout=500)
+                    if current_val:
+                        continue
+
+                    label_text = _get_label(inp)
+                    if not label_text:
+                        continue
+
+                    fill_value = _answer_for_label(label_text)
+                    label_lower = label_text.lower()
+                    full_name = answers.get("full_name", "")
+                    if full_name:
+                        if "first" in label_lower:
+                            parts = full_name.split()
+                            fill_value = parts[0] if parts else full_name
+                        elif "last" in label_lower:
+                            parts = full_name.split()
+                            fill_value = parts[-1] if len(parts) > 1 else full_name
+
+                    if fill_value:
+                        inp.fill(fill_value, timeout=3000)
+                        self.logger.info(f"Easy Apply: filled '{label_text}'")
+                except Exception:
+                    continue
+
+            for sel_el in page.locator("select").all():
+                try:
+                    if not sel_el.is_visible(timeout=500):
+                        continue
+                    label_text = _get_label(sel_el)
+                    if not label_text:
+                        continue
+                    desired = (_answer_for_label(label_text) or "").strip()
+                    if not desired:
+                        continue
+
+                    selected = False
+                    for option in sel_el.locator("option").all():
+                        try:
+                            opt_value = (option.get_attribute("value", timeout=400) or "").strip()
+                            opt_text = (option.inner_text(timeout=400) or "").strip()
+                            if desired.lower() in opt_text.lower() or desired.lower() == opt_value.lower():
+                                if opt_value:
+                                    sel_el.select_option(value=opt_value)
+                                else:
+                                    sel_el.select_option(label=opt_text)
+                                selected = True
+                                break
+                        except Exception:
+                            continue
+                    if not selected:
+                        try:
+                            sel_el.select_option(label=desired)
+                            selected = True
+                        except Exception:
+                            pass
+                    if selected:
+                        self.logger.info(f"Easy Apply: selected option for '{label_text}'")
+                except Exception:
+                    continue
+
+            for fieldset in page.locator("fieldset").all():
+                try:
+                    if not fieldset.is_visible(timeout=500):
+                        continue
+                    legend = ""
+                    try:
+                        legend = (fieldset.locator("legend").first.inner_text(timeout=400) or "").strip()
+                    except Exception:
+                        pass
+                    if not legend:
+                        continue
+
+                    desired = (_answer_for_label(legend) or "").strip().lower()
+                    if not desired:
+                        continue
+
+                    for control in fieldset.locator("input[type='radio'], input[type='checkbox']").all():
+                        try:
+                            control_id = control.get_attribute("id", timeout=400) or ""
+                            option_label = ""
+                            if control_id:
+                                option = page.locator(f"label[for='{control_id}']").first
+                                if option.count() > 0:
+                                    option_label = (option.inner_text(timeout=400) or "").strip().lower()
+                            option_value = (control.get_attribute("value", timeout=400) or "").strip().lower()
+                            if desired in option_label or desired == option_value:
+                                try:
+                                    control.check(timeout=2000)
+                                except Exception:
+                                    control.click(timeout=2000)
+                                self.logger.info(f"Easy Apply: selected '{desired}' for '{legend}'")
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception as exc:
+            self.logger.warning(f"Easy Apply fill step error: {exc}")
+
+    def _find_modal_advance_button(self, page: Any) -> Any:
+        """Find the primary action button in the Easy Apply modal (Next/Review/Submit)."""
+        selectors = [
+            "button[aria-label*='Submit application']",
+            "button[aria-label*='submit']",
+            "button:has-text('Submit application')",
+            "button:has-text('Submit')",
+            "button[aria-label*='Review']",
+            "button:has-text('Review')",
+            "button[aria-label*='Continue to next step']",
+            "button:has-text('Next')",
+            "button:has-text('Continue')",
+            ".artdeco-modal button.artdeco-button--primary",
+            ".jobs-easy-apply-modal button.artdeco-button--primary",
+        ]
+        for sel in selectors:
+            try:
+                btn = page.locator(sel).last  # last primary button in modal
+                if btn.count() > 0 and btn.is_visible(timeout=1500) and btn.is_enabled(timeout=1500):
+                    return btn
+            except Exception:
+                continue
+        return None
 
     # ------------------------------------------------------------------
     # Intro message
@@ -2018,9 +3176,10 @@ class TelegramJobSession:
         self._state = self.STATE_INTRO
         if self.new_jobs:
             self._state = self.STATE_BROWSING_NEW
-            # Pre-load first job so the user can reply Apply/Skip without Next
-            self._current_job = self.new_jobs[0]
-            self._send(self._job_card_text(self._current_job, 1, count))
+            # Do not pre-send the first job card; wait for explicit Next so
+            # user can choose db/done first.
+            self._new_job_idx = -1
+            self._current_job = None
 
     # ------------------------------------------------------------------
     # Main event loop
@@ -2034,6 +3193,10 @@ class TelegramJobSession:
             return
 
         offset = 0
+        bootstrap_updates = self._get_updates(offset=offset, timeout=0)
+        if bootstrap_updates:
+            offset = bootstrap_updates[-1]["update_id"] + 1
+            self.logger.info(f"Telegram poll bootstrap: skipped {len(bootstrap_updates)} stale update(s)")
         self.logger.info("Telegram session started, entering poll loop")
 
         while True:
@@ -2052,6 +3215,26 @@ class TelegramJobSession:
                 if not keep_going:
                     self.logger.info("Telegram session ended by user (Done)")
                     return
+
+
+# ── Populate TelegramJobSession.LABEL_TO_PROFILE_KEY after class is defined ──
+# Maps compiled regex patterns of LinkedIn field labels → saved profile keys.
+# Order matters: first match wins.
+TelegramJobSession.LABEL_TO_PROFILE_KEY = [
+    (re.compile(r"first.?name",                 re.I), "full_name"),
+    (re.compile(r"last.?name",                  re.I), "full_name"),
+    (re.compile(r"full.?name|your name",        re.I), "full_name"),
+    (re.compile(r"email",                       re.I), "email"),
+    (re.compile(r"phone|mobile",                re.I), "phone"),
+    (re.compile(r"city|location|address",       re.I), "location"),
+    (re.compile(r"linkedin",                    re.I), "linkedin"),
+    (re.compile(r"github",                      re.I), "github"),
+    (re.compile(r"website|portfolio|personal.?site", re.I), "website"),
+    (re.compile(r"year.*experience|experience.*year|years of exp", re.I), "experience_years"),
+    (re.compile(r"notice|availability|when can you start|start date", re.I), "notice_period"),
+    (re.compile(r"salary|compensation|expected.*pay|pay.*expect", re.I), "salary_expectation"),
+    (re.compile(r"cover.?letter|motivation|why.*apply|why.*interest", re.I), "motivation"),
+]
 
 
 # ---------------------------------------------------------------------------
