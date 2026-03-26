@@ -63,6 +63,55 @@ def normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
+def normalize_form_label(value: str) -> str:
+    label = normalize_space(value)
+    label = re.sub(r"\s*\(required\)\s*", " ", label, flags=re.IGNORECASE)
+    label = label.replace("*", " ")
+    label = re.sub(r"^[\-•·\s]+", "", label)
+    return normalize_space(label)
+
+
+def extract_question_label_from_block_text(block_text: str) -> str:
+    lines = [normalize_form_label(line) for line in (block_text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+
+    for line in lines:
+        if "?" in line:
+            return line
+
+    noise_values = {
+        "yes",
+        "no",
+        "y",
+        "n",
+        "none",
+        "n/a",
+        "na",
+        "prefer not to say",
+        "select",
+        "choose",
+        "next",
+        "review",
+        "submit",
+    }
+    for line in lines:
+        lowered = line.lower()
+        if lowered not in noise_values:
+            return line
+
+    return lines[0]
+
+
+def is_linkedin_login_page(url: str) -> bool:
+    """Return True if the URL indicates LinkedIn redirected us to a login wall."""
+    if not url:
+        return False
+    markers = ("/login", "/checkpoint/lg/", "/uas/login", "/authwall")
+    return any(m in url for m in markers)
+
+
 def format_display_datetime(value: Optional[str]) -> str:
     raw = (value or "").strip()
     if not raw:
@@ -1724,6 +1773,7 @@ class TelegramJobSession:
         new_jobs: List[Dict],
         query: str,
         logger: logging.Logger,
+        easy_apply_run_mode: str = "normal",
     ):
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -1745,6 +1795,8 @@ class TelegramJobSession:
         self._return_state_after_apply: str = self.STATE_INTRO
         self._profile_path: Path = self.db.db_path.parent / self.PROFILE_FILENAME
         self._saved_profile: Dict[str, str] = self._load_saved_profile()
+        mode = (easy_apply_run_mode or "normal").strip().lower()
+        self._easy_apply_run_mode = mode if mode in {"normal", "testing"} else "normal"
 
     # ------------------------------------------------------------------
     # Low-level Telegram send helpers
@@ -1886,8 +1938,49 @@ class TelegramJobSession:
         primary_profile = _os.path.join(local_app_data, "Google", "Chrome", "User Data") if local_app_data else ""
         fallback_profile = str(Path(__file__).parent / ".playwright_profile")
 
+        testing_mode = self._easy_apply_run_mode == "testing"
         discovered: List[Tuple[str, str, str]] = []
         seen_keys: set = set()
+
+        def _random_digits(length: int) -> str:
+            return "".join(random.choice("0123456789") for _ in range(length))
+
+        def _random_testing_value(label_text: str, field_type: str) -> str:
+            label_lower = (label_text or "").lower()
+            ftype = (field_type or "text").lower()
+            token = random.randint(100, 999)
+
+            if "email" in label_lower or ftype == "email":
+                return f"test{token}@example.com"
+            if "phone" in label_lower or "mobile" in label_lower or ftype == "tel":
+                return f"05{_random_digits(8)}"
+            if "linkedin" in label_lower:
+                return f"https://www.linkedin.com/in/test-user-{token}"
+            if "github" in label_lower:
+                return f"https://github.com/test-user-{token}"
+            if "website" in label_lower or "portfolio" in label_lower or ftype == "url":
+                return f"https://example.com/profile-{token}"
+            if "salary" in label_lower or "compensation" in label_lower:
+                return str(random.randint(20000, 90000))
+            if "notice" in label_lower or "availability" in label_lower:
+                return random.choice(["Immediate", "2 weeks", "1 month"])
+            if "experience" in label_lower and ("year" in label_lower or ftype == "number"):
+                return str(random.randint(2, 15))
+            if "first" in label_lower and "name" in label_lower:
+                return random.choice(["Ariel", "Dana", "Noam", "Lior"])
+            if "last" in label_lower and "name" in label_lower:
+                return random.choice(["Samin", "Levi", "Cohen", "Bar"])
+            if "name" in label_lower:
+                return random.choice(["Ariel Samin", "Dana Levi", "Noam Cohen"])
+            if "city" in label_lower or "location" in label_lower:
+                return random.choice(["Tel Aviv", "Jerusalem", "Haifa", "Bangkok"])
+            if ftype == "number":
+                return str(random.randint(1, 999))
+            if ftype == "date":
+                return "2026-12-01"
+            if ftype == "textarea":
+                return f"Automated testing answer {token}"
+            return f"test-{token}"
 
         def _label_for(page: Any, inp: Any) -> str:
             """Best-effort label text for a form element."""
@@ -1895,7 +1988,7 @@ class TelegramJobSession:
                 try:
                     v = inp.get_attribute(attr, timeout=400)
                     if v and v.strip():
-                        return v.strip()
+                        return normalize_form_label(v)
                 except Exception:
                     pass
             try:
@@ -1905,13 +1998,13 @@ class TelegramJobSession:
                     if lbl.count() > 0:
                         t = lbl.inner_text(timeout=400)
                         if t and t.strip():
-                            return t.strip()
+                            return normalize_form_label(t)
             except Exception:
                 pass
             try:
                 t = inp.get_attribute("placeholder", timeout=400)
                 if t and t.strip():
-                    return t.strip()
+                    return normalize_form_label(t)
             except Exception:
                 pass
             # Walk up to the nearest fieldset/div and grab its first text node
@@ -1922,7 +2015,7 @@ class TelegramJobSession:
                     .strip()
                 )
                 if ctx_text:
-                    return ctx_text.split("\n")[0].strip()
+                    return extract_question_label_from_block_text(ctx_text)
             except Exception:
                 pass
             return ""
@@ -1944,9 +2037,27 @@ class TelegramJobSession:
             seen_keys.add(key)
             discovered.append((key, label, ftype))
 
-        def _scan_step(page: Any) -> None:
+        def _is_advance_action(btn_text: str, btn_aria: str) -> bool:
+            text = (btn_text or "").strip().lower()
+            aria = (btn_aria or "").strip().lower()
+            haystack = f"{text} {aria}"
+            advance_tokens = [
+                "next", "continue", "review",
+                "التالي", "الاستمرار", "مراجعة",
+            ]
+            return any(token in haystack for token in advance_tokens)
+
+        def _is_submit_action(btn_text: str, btn_aria: str) -> bool:
+            text = (btn_text or "").strip().lower()
+            aria = (btn_aria or "").strip().lower()
+            haystack = f"{text} {aria}"
+            submit_tokens = ["submit", "ارسال", "إرسال", "تقديم"]
+            return any(token in haystack for token in submit_tokens)
+
+        def _scan_step(page: Any, scope: Optional[Any] = None) -> None:
+            root = scope if scope is not None else page
             # File inputs
-            for fi in page.locator("input[type='file']").all():
+            for fi in root.locator("input[type='file']").all():
                 try:
                     if not fi.is_visible(timeout=400):
                         continue
@@ -1960,8 +2071,11 @@ class TelegramJobSession:
                     pass
 
             # Text / email / tel / textarea inputs
-            sel = "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], input[type='number'], textarea"
-            for inp in page.locator(sel).all():
+            sel = (
+                "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], "
+                "input[type='number'], input[type='date'], input:not([type]), textarea"
+            )
+            for inp in root.locator(sel).all():
                 try:
                     if not inp.is_visible(timeout=400):
                         continue
@@ -1980,8 +2094,22 @@ class TelegramJobSession:
                 except Exception:
                     pass
 
+            # ARIA textboxes used by custom widgets
+            for tb in root.locator("[role='textbox']").all():
+                try:
+                    if not tb.is_visible(timeout=300):
+                        continue
+                    label = _label_for(page, tb)
+                    if not label:
+                        continue
+                    pk = _profile_key_for(label)
+                    key = pk if pk else f"custom__{_slug(label)}"
+                    _add(key, label, "text")
+                except Exception:
+                    continue
+
             # Select dropdowns
-            for sel_el in page.locator("select").all():
+            for sel_el in root.locator("select").all():
                 try:
                     if not sel_el.is_visible(timeout=400):
                         continue
@@ -1994,19 +2122,33 @@ class TelegramJobSession:
                 except Exception:
                     pass
 
+            # Custom combobox dropdowns
+            for cb in root.locator("[role='combobox']").all():
+                try:
+                    if not cb.is_visible(timeout=300):
+                        continue
+                    label = _label_for(page, cb)
+                    if not label:
+                        continue
+                    pk = _profile_key_for(label)
+                    key = pk if pk else f"custom__{_slug(label)}"
+                    _add(key, label, "select")
+                except Exception:
+                    continue
+
             # Radio/checkbox groups — grab question from fieldset legend
-            for fieldset in page.locator("fieldset").all():
+            for fieldset in root.locator("fieldset").all():
                 try:
                     if not fieldset.is_visible(timeout=400):
                         continue
                     legend = ""
                     try:
-                        legend = fieldset.locator("legend").first.inner_text(timeout=400).strip()
+                        legend = normalize_form_label(fieldset.locator("legend").first.inner_text(timeout=400))
                     except Exception:
                         pass
                     if not legend:
                         try:
-                            legend = fieldset.inner_text(timeout=400).split("\n")[0].strip()
+                            legend = extract_question_label_from_block_text(fieldset.inner_text(timeout=400))
                         except Exception:
                             pass
                     if not legend:
@@ -2024,15 +2166,151 @@ class TelegramJobSession:
                 except Exception:
                     pass
 
-        def _prefill_required_for_scan(page: Any) -> None:
+            # Radio groups not wrapped in fieldset (common in custom UIs)
+            handled_radio_names: set = set()
+            for radio in root.locator("input[type='radio']").all():
+                try:
+                    if not radio.is_visible(timeout=300):
+                        continue
+                    name = (radio.get_attribute("name", timeout=300) or "").strip()
+                    if not name or name in handled_radio_names:
+                        continue
+                    handled_radio_names.add(name)
+
+                    group = root.locator(f"input[type='radio'][name='{name}']")
+                    if group.count() == 0:
+                        continue
+
+                    first = group.first
+                    label = ""
+                    try:
+                        container_text = first.locator(
+                            "xpath=ancestor::*[@role='radiogroup' or self::fieldset or contains(@class, 'fb-dash-form-element') or contains(@class, 'jobs-easy-apply-form-section__grouping')][1]"
+                        ).inner_text(timeout=400)
+                        label = extract_question_label_from_block_text(container_text)
+                    except Exception:
+                        pass
+
+                    if not label:
+                        label = _label_for(page, first)
+                    if not label:
+                        continue
+
+                    pk = _profile_key_for(label)
+                    key = pk if pk else f"custom__{_slug(label)}"
+                    _add(key, label, "radio")
+                except Exception:
+                    continue
+
+            # ARIA radio groups (custom LinkedIn controls)
+            for rg in root.locator("[role='radiogroup']").all():
+                try:
+                    if not rg.is_visible(timeout=300):
+                        continue
+                    label = ""
+                    try:
+                        label = extract_question_label_from_block_text(rg.inner_text(timeout=400))
+                    except Exception:
+                        pass
+                    if not label:
+                        continue
+                    pk = _profile_key_for(label)
+                    key = pk if pk else f"custom__{_slug(label)}"
+                    _add(key, label, "radio")
+                except Exception:
+                    continue
+
+            # Standalone checkboxes (common consent/custom questions)
+            for chk in root.locator("input[type='checkbox']").all():
+                try:
+                    if not chk.is_visible(timeout=300):
+                        continue
+                    label = _label_for(page, chk)
+                    if not label:
+                        continue
+                    pk = _profile_key_for(label)
+                    key = pk if pk else f"custom__{_slug(label)}"
+                    _add(key, label, "checkbox")
+                except Exception:
+                    continue
+
+        def _prefill_required_for_scan(page: Any, scope: Optional[Any] = None) -> None:
             """
             Best-effort prefill so scanner can pass required step validation and
             discover later wizard pages. Uses harmless placeholder values and
             never reaches Submit (loop breaks before submit click).
             """
+            root = scope if scope is not None else page
+
+            def _is_radio_selected(radio_input: Any) -> bool:
+                try:
+                    return radio_input.is_checked(timeout=200)
+                except Exception:
+                    try:
+                        checked_attr = (radio_input.get_attribute("checked", timeout=200) or "").strip().lower()
+                        return checked_attr in {"checked", "true", "1"}
+                    except Exception:
+                        return False
+
+            def _try_select_radio_input(radio_input: Any, question_label: str = "") -> bool:
+                try:
+                    radio_input.check(timeout=700)
+                    if testing_mode:
+                        self.logger.info(
+                            f"Scan prefill radio: selected via check()"
+                            f"{f' | question={question_label!r}' if question_label else ''}"
+                        )
+                    return True
+                except Exception:
+                    pass
+                try:
+                    radio_input.click(timeout=700)
+                    if testing_mode:
+                        self.logger.info(
+                            f"Scan prefill radio: selected via direct click()"
+                            f"{f' | question={question_label!r}' if question_label else ''}"
+                        )
+                    return True
+                except Exception:
+                    pass
+                try:
+                    radio_id = (radio_input.get_attribute("id", timeout=200) or "").strip()
+                    if radio_id:
+                        lbl = root.locator(f"label[for='{radio_id}']").first
+                        if lbl.count() > 0 and lbl.is_visible(timeout=200):
+                            lbl.click(timeout=700)
+                            if testing_mode:
+                                self.logger.info(
+                                    f"Scan prefill radio: selected via label[for] fallback"
+                                    f"{f' | question={question_label!r}' if question_label else ''}"
+                                )
+                            return True
+                except Exception:
+                    pass
+                try:
+                    wrapper = radio_input.locator("xpath=ancestor::label[1]").first
+                    if wrapper.count() > 0 and wrapper.is_visible(timeout=200):
+                        wrapper.click(timeout=700)
+                        if testing_mode:
+                            self.logger.info(
+                                f"Scan prefill radio: selected via ancestor<label> fallback"
+                                f"{f' | question={question_label!r}' if question_label else ''}"
+                            )
+                        return True
+                except Exception:
+                    pass
+                if testing_mode:
+                    self.logger.info(
+                        f"Scan prefill radio: failed to select any option"
+                        f"{f' | question={question_label!r}' if question_label else ''}"
+                    )
+                return False
             # Fill empty text-like controls
-            text_like = "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], input[type='number'], textarea"
-            for inp in page.locator(text_like).all():
+            text_like = (
+                "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], "
+                "input[type='number'], input[type='date'], input:not([type]), textarea"
+            )
+            for inp in root.locator(text_like).all():
                 try:
                     if not inp.is_visible(timeout=300):
                         continue
@@ -2040,43 +2318,65 @@ class TelegramJobSession:
                     if cur:
                         continue
                     label = _label_for(page, inp).lower()
-                    fill = "test"
-                    if "email" in label:
-                        fill = "test@example.com"
-                    elif "phone" in label or "mobile" in label:
-                        fill = "0500000000"
-                    elif "linkedin" in label:
-                        fill = self._saved_profile.get("linkedin") or "https://www.linkedin.com/in/test"
-                    elif "github" in label:
-                        fill = self._saved_profile.get("github") or "No"
-                    elif "website" in label or "blog" in label:
-                        fill = self._saved_profile.get("website") or "No"
-                    elif "year" in label and "experience" in label:
-                        fill = self._saved_profile.get("experience_years") or "5"
-                    elif "salary" in label or "compensation" in label:
-                        fill = self._saved_profile.get("salary_expectation") or "30000"
-                    elif "notice" in label or "availability" in label:
-                        fill = self._saved_profile.get("notice_period") or "1 month"
-                    elif "first" in label and "name" in label:
-                        fill = (self._saved_profile.get("full_name") or "Test User").split()[0]
-                    elif "last" in label and "name" in label:
-                        full = (self._saved_profile.get("full_name") or "Test User").split()
-                        fill = full[-1] if len(full) > 1 else full[0]
-                    elif "name" in label:
-                        fill = self._saved_profile.get("full_name") or "Test User"
-                    elif "location" in label or "city" in label:
-                        fill = self._saved_profile.get("location") or "Tel Aviv"
+                    ftype = (inp.get_attribute("type", timeout=300) or "text").strip().lower()
+                    if inp.evaluate("el => el.tagName").lower() == "textarea":
+                        ftype = "textarea"
+
+                    if testing_mode:
+                        fill = _random_testing_value(label, ftype)
+                    else:
+                        fill = "test"
+                        if "email" in label:
+                            fill = "test@example.com"
+                        elif "phone" in label or "mobile" in label:
+                            fill = "0500000000"
+                        elif "linkedin" in label:
+                            fill = self._saved_profile.get("linkedin") or "https://www.linkedin.com/in/test"
+                        elif "github" in label:
+                            fill = self._saved_profile.get("github") or "No"
+                        elif "website" in label or "blog" in label:
+                            fill = self._saved_profile.get("website") or "No"
+                        elif "year" in label and "experience" in label:
+                            fill = self._saved_profile.get("experience_years") or "5"
+                        elif "salary" in label or "compensation" in label:
+                            fill = self._saved_profile.get("salary_expectation") or "30000"
+                        elif "notice" in label or "availability" in label:
+                            fill = self._saved_profile.get("notice_period") or "1 month"
+                        elif "first" in label and "name" in label:
+                            fill = (self._saved_profile.get("full_name") or "Test User").split()[0]
+                        elif "last" in label and "name" in label:
+                            full = (self._saved_profile.get("full_name") or "Test User").split()
+                            fill = full[-1] if len(full) > 1 else full[0]
+                        elif "name" in label:
+                            fill = self._saved_profile.get("full_name") or "Test User"
+                        elif "location" in label or "city" in label:
+                            fill = self._saved_profile.get("location") or "Tel Aviv"
                     inp.fill(fill, timeout=1000)
                 except Exception:
                     continue
 
+            # Fill ARIA textboxes (for custom LinkedIn controls)
+            for tb in root.locator("[role='textbox']").all():
+                try:
+                    if not tb.is_visible(timeout=300):
+                        continue
+                    current_text = (tb.inner_text(timeout=300) or "").strip()
+                    if current_text:
+                        continue
+                    label = _label_for(page, tb)
+                    fill = _random_testing_value(label, "text") if testing_mode else "test"
+                    tb.click(timeout=800)
+                    page.keyboard.type(fill, delay=15)
+                except Exception:
+                    continue
+
             # Select first non-empty option for required selects
-            for sel_el in page.locator("select").all():
+            for sel_el in root.locator("select").all():
                 try:
                     if not sel_el.is_visible(timeout=300):
                         continue
                     options = sel_el.locator("option").all()
-                    picked = False
+                    candidates: List[str] = []
                     for opt in options:
                         try:
                             value = (opt.get_attribute("value", timeout=300) or "").strip()
@@ -2085,11 +2385,17 @@ class TelegramJobSession:
                                 continue
                             if text in {"select", "choose", "please select"}:
                                 continue
-                            sel_el.select_option(value=value)
-                            picked = True
-                            break
+                            candidates.append(value)
                         except Exception:
                             continue
+                    picked = False
+                    if candidates:
+                        try:
+                            value_to_pick = random.choice(candidates) if testing_mode else candidates[0]
+                            sel_el.select_option(value=value_to_pick)
+                            picked = True
+                        except Exception:
+                            pass
                     if not picked and options:
                         try:
                             fallback_value = (options[-1].get_attribute("value", timeout=300) or "").strip()
@@ -2100,8 +2406,54 @@ class TelegramJobSession:
                 except Exception:
                     continue
 
+            # Fill custom combobox dropdowns (common LinkedIn component)
+            for cb in root.locator("[role='combobox']").all():
+                try:
+                    if not cb.is_visible(timeout=300):
+                        continue
+                    current_text = (cb.inner_text(timeout=300) or "").strip().lower()
+                    if current_text and current_text not in {"select", "choose", "בחר", "اختر"}:
+                        continue
+                    try:
+                        cb.click(timeout=1000)
+                    except Exception:
+                        continue
+                    page.wait_for_timeout(250)
+                    options = page.locator("[role='option']")
+                    if options.count() == 0:
+                        continue
+                    picked = False
+                    candidate_indexes: List[int] = []
+                    for idx in range(min(options.count(), 12)):
+                        try:
+                            opt = options.nth(idx)
+                            if not opt.is_visible(timeout=200):
+                                continue
+                            text = (opt.inner_text(timeout=300) or "").strip().lower()
+                            if not text or text in {"select", "choose", "בחר", "اختر"}:
+                                continue
+                            candidate_indexes.append(idx)
+                        except Exception:
+                            continue
+
+                    if candidate_indexes:
+                        try:
+                            picked_idx = random.choice(candidate_indexes) if testing_mode else candidate_indexes[0]
+                            options.nth(picked_idx).click(timeout=1000)
+                            picked = True
+                        except Exception:
+                            pass
+
+                    if not picked:
+                        try:
+                            page.keyboard.press("Escape")
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+
             # For each radio group, select first visible option if none selected
-            for fieldset in page.locator("fieldset").all():
+            for fieldset in root.locator("fieldset").all():
                 try:
                     radios = fieldset.locator("input[type='radio']")
                     if radios.count() == 0:
@@ -2110,27 +2462,125 @@ class TelegramJobSession:
                     for idx in range(radios.count()):
                         try:
                             r = radios.nth(idx)
-                            if r.is_checked(timeout=200):
+                            if _is_radio_selected(r):
                                 already_selected = True
                                 break
                         except Exception:
                             continue
                     if already_selected:
                         continue
+                    choices: List[int] = []
                     for idx in range(radios.count()):
                         try:
                             r = radios.nth(idx)
-                            if not r.is_visible(timeout=200):
+                            if r.is_visible(timeout=200):
+                                choices.append(idx)
                                 continue
-                            try:
-                                r.check(timeout=800)
-                            except Exception:
-                                r.click(timeout=800)
-                            break
+                            rid = (r.get_attribute("id", timeout=200) or "").strip()
+                            if rid:
+                                rl = root.locator(f"label[for='{rid}']").first
+                                if rl.count() > 0 and rl.is_visible(timeout=200):
+                                    choices.append(idx)
                         except Exception:
                             continue
+                    if choices:
+                        pick_idx = random.choice(choices) if testing_mode else choices[0]
+                        try:
+                            r = radios.nth(pick_idx)
+                            _try_select_radio_input(r, _label_for(page, r))
+                        except Exception:
+                            pass
                 except Exception:
                     continue
+
+            # Standalone radio groups by name (outside fieldset)
+            radio_names: set = set()
+            for radio in root.locator("input[type='radio']").all():
+                try:
+                    name = (radio.get_attribute("name", timeout=200) or "").strip()
+                    if not name or name in radio_names:
+                        continue
+                    radio_names.add(name)
+                    group = root.locator(f"input[type='radio'][name='{name}']")
+                    choices: List[int] = []
+                    for idx in range(group.count()):
+                        try:
+                            candidate = group.nth(idx)
+                            if candidate.is_visible(timeout=150):
+                                choices.append(idx)
+                                continue
+                            rid = (candidate.get_attribute("id", timeout=150) or "").strip()
+                            if rid:
+                                rl = root.locator(f"label[for='{rid}']").first
+                                if rl.count() > 0 and rl.is_visible(timeout=150):
+                                    choices.append(idx)
+                        except Exception:
+                            continue
+                    if not choices:
+                        continue
+                    pick_idx = random.choice(choices) if testing_mode else choices[0]
+                    target = group.nth(pick_idx)
+                    if not _is_radio_selected(target):
+                        _try_select_radio_input(target, _label_for(page, target))
+                except Exception:
+                    continue
+
+            # ARIA radio groups (custom controls with role='radio')
+            for rg in root.locator("[role='radiogroup']").all():
+                try:
+                    if not rg.is_visible(timeout=200):
+                        continue
+                    options = rg.locator("[role='radio']")
+                    if options.count() == 0:
+                        continue
+                    already_selected = False
+                    for idx in range(options.count()):
+                        try:
+                            aria_checked = (options.nth(idx).get_attribute("aria-checked", timeout=150) or "").strip().lower()
+                            if aria_checked == "true":
+                                already_selected = True
+                                break
+                        except Exception:
+                            continue
+                    if already_selected:
+                        continue
+                    visible_choices = []
+                    for idx in range(options.count()):
+                        try:
+                            if options.nth(idx).is_visible(timeout=150):
+                                visible_choices.append(idx)
+                        except Exception:
+                            continue
+                    if not visible_choices:
+                        continue
+                    pick_idx = random.choice(visible_choices) if testing_mode else visible_choices[0]
+                    try:
+                        options.nth(pick_idx).click(timeout=800)
+                        if testing_mode:
+                            rg_label = extract_question_label_from_block_text(rg.inner_text(timeout=200))
+                            self.logger.info(
+                                f"Scan prefill radio: selected ARIA role='radio' option"
+                                f"{f' | question={rg_label!r}' if rg_label else ''}"
+                            )
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+
+            # Check required/visible checkboxes in testing mode to unblock Next
+            if testing_mode:
+                for chk in root.locator("input[type='checkbox']").all():
+                    try:
+                        if not chk.is_visible(timeout=150):
+                            continue
+                        if chk.is_checked(timeout=150):
+                            continue
+                        try:
+                            chk.check(timeout=700)
+                        except Exception:
+                            chk.click(timeout=700)
+                    except Exception:
+                        continue
 
         try:
             with sync_playwright() as pw:
@@ -2141,6 +2591,8 @@ class TelegramJobSession:
                         headless=False,
                         viewport={"width": 1440, "height": 900},
                         slow_mo=100,
+                        locale="en-US",
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                     )
                 except (target_closed_error, Exception) as exc:
                     self.logger.warning(f"Scan: primary profile failed ({exc}), using fallback")
@@ -2151,57 +2603,144 @@ class TelegramJobSession:
                         headless=False,
                         viewport={"width": 1440, "height": 900},
                         slow_mo=100,
+                        locale="en-US",
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                     )
                 try:
                     page = ctx.pages[0] if ctx.pages else ctx.new_page()
                     page.set_default_timeout(20000)
-                    page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(2000)
 
-                    # Click Easy Apply (same robustness as submit flow)
-                    clicked = False
-                    for sel in [
+                    page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
+
+                    # Wait for network to settle so dynamic elements render
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass  # networkidle timeout is not fatal
+
+                    # Login-wall guard: if LinkedIn redirected us, bail early
+                    current_url = page.url
+                    if is_linkedin_login_page(current_url):
+                        self.logger.warning(f"Scan: LinkedIn login wall detected ({current_url}), skipping scan")
+                        return []
+
+                    page.wait_for_timeout(3000)
+
+                    # Probe for any Easy Apply element (up to 8 s) before the retry loop
+                    EASY_APPLY_SELECTORS = [
+                        ".jobs-apply-button",
+                        "a.jobs-apply-button",
                         "button.jobs-apply-button",
+                        "[data-control-name*='jobdetails_topcard_inapply']",
+                        "[data-control-name*='jobdetails_topcard_inapply'] button",
+                        ".jobs-apply-button--top-card",
+                        ".jobs-s-apply [role='button']",
                         "button:has-text('Easy Apply')",
                         "button[aria-label*='Easy Apply']",
                         ".jobs-s-apply button",
-                    ]:
-                        try:
-                            btn = page.locator(sel).first
-                            if btn.count() > 0 and btn.is_visible(timeout=3000):
-                                btn.click(timeout=5000)
-                                clicked = True
-                                self.logger.info(f"Scan: clicked Easy Apply via selector {sel!r}")
-                                break
-                        except Exception:
-                            continue
+                        "[role='button']:has-text('Easy Apply')",
+                        "a:has-text('Easy Apply')",
+                        "span:has-text('Easy Apply')",
+                    ]
+                    _combined_selector = ", ".join(EASY_APPLY_SELECTORS)
+                    try:
+                        page.wait_for_selector(_combined_selector, timeout=8000)
+                        self.logger.info("Scan: Easy Apply element detected in DOM")
+                    except Exception:
+                        self.logger.warning("Scan: wait_for_selector timed out – button may not be present")
+
+                    clicked = False
+                    for _attempt in range(3):
+                        if _attempt > 0:
+                            page.wait_for_timeout(1500)
+                        for sel in EASY_APPLY_SELECTORS:
+                            try:
+                                btn = page.locator(sel).first
+                                if btn.count() > 0 and btn.is_visible(timeout=3000):
+                                    btn.click(timeout=5000)
+                                    clicked = True
+                                    self.logger.info(
+                                        f"Scan: clicked Easy Apply via {sel!r} "
+                                        f"(attempt {_attempt + 1})"
+                                    )
+                                    break
+                            except Exception:
+                                continue
+                        if clicked:
+                            break
 
                     if not clicked:
-                        self.logger.info("Scan: Easy Apply button not found – returning empty scan")
+                        # Save a screenshot so we can diagnose what the page shows
+                        _shot_path = str(Path(__file__).parent / "scan_debug_screenshot.png")
+                        try:
+                            page.screenshot(path=_shot_path, full_page=False)
+                            self.logger.info(f"Scan: debug screenshot saved → {_shot_path}")
+                        except Exception as _se:
+                            self.logger.debug(f"Scan: screenshot failed: {_se}")
+                        self.logger.info(
+                            "Scan: Easy Apply button not found after 3 attempts – "
+                            f"page url: {page.url}"
+                        )
                         return []
 
-                    page.wait_for_timeout(2000)
+                    # Wait for the Easy Apply modal to appear
+                    try:
+                        page.wait_for_selector(
+                            ".artdeco-modal, .jobs-easy-apply-modal",
+                            timeout=8000
+                        )
+                        self.logger.info("Scan: Easy Apply modal opened")
+                    except Exception:
+                        # Modal selector not found; give a flat extra wait before scanning
+                        self.logger.warning("Scan: modal selector not detected, proceeding with flat wait")
+                        page.wait_for_timeout(2000)
+
+                    # Resolve modal container for scoped operations
+                    modal_scope = None
+                    for _modal_sel in [".artdeco-modal", ".jobs-easy-apply-modal"]:
+                        try:
+                            _m = page.locator(_modal_sel).first
+                            if _m.count() > 0 and _m.is_visible(timeout=500):
+                                modal_scope = _m
+                                self.logger.info(f"Scan: modal scope resolved via {_modal_sel!r}")
+                                break
+                        except Exception:
+                            pass
+                    if modal_scope is None:
+                        self.logger.warning("Scan: modal scope not resolved, falling back to full page")
 
                     # Walk wizard steps (scan only – never submit)
                     max_steps = 10
                     for _step in range(max_steps):
                         page.wait_for_timeout(800)
-                        _scan_step(page)
-                        _prefill_required_for_scan(page)
+                        before = len(discovered)
+                        _scan_step(page, scope=modal_scope)
+                        _prefill_required_for_scan(page, scope=modal_scope)
+                        new_fields = len(discovered) - before
+                        self.logger.info(f"Scan step {_step}: +{new_fields} new field(s), total={len(discovered)}")
 
-                        # Find advance button
+                        # Find advance button (language-agnostic) — scoped to modal
                         advance = None
+                        advance_root = modal_scope if modal_scope is not None else page
                         for sel in [
-                            "button[aria-label*='Continue to next step']",
-                            "button:has-text('Next')",
-                            "button:has-text('Continue')",
-                            "button[aria-label*='Review']",
-                            "button:has-text('Review')",
                             ".artdeco-modal button.artdeco-button--primary",
                             ".jobs-easy-apply-modal button.artdeco-button--primary",
+                            "button.artdeco-button--primary",
+                            "button[aria-label*='Continue to next step']",
+                            "button[aria-label*='Next']",
+                            "button[aria-label*='next']",
+                            "button[aria-label*='Review']",
+                            "button[aria-label*='review']",
+                            "button[aria-label*='التالي']",
+                            "button[aria-label*='الاستمرار']",
+                            "button[aria-label*='الخطوة التالية']",
+                            "button[aria-label*='مراجعة']",
+                            "button:has-text('Next')",
+                            "button:has-text('Continue')",
+                            "button:has-text('Review')",
                         ]:
                             try:
-                                b = page.locator(sel).last
+                                b = advance_root.locator(sel).last
                                 if b.count() > 0 and b.is_visible(timeout=1000) and b.is_enabled(timeout=1000):
                                     advance = b
                                     break
@@ -2209,10 +2748,102 @@ class TelegramJobSession:
                                 continue
 
                         if advance is None:
+                            # Robust fallback: inspect visible modal buttons directly.
+                            blocked_primary = None
+                            try:
+                                modal_buttons = advance_root.locator("button")
+                                for idx in range(modal_buttons.count()):
+                                    try:
+                                        b = modal_buttons.nth(idx)
+                                        if not b.is_visible(timeout=300):
+                                            continue
+                                        cls = (b.get_attribute("class", timeout=300) or "").lower()
+                                        if "artdeco-button--primary" not in cls:
+                                            continue
+                                        if "dismiss" in cls:
+                                            continue
+                                        if b.is_enabled(timeout=300):
+                                            advance = b
+                                            break
+                                        blocked_primary = b
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+
+                            if advance is None and blocked_primary is not None:
+                                try:
+                                    _prefill_required_for_scan(page, scope=modal_scope)
+                                    page.wait_for_timeout(500)
+                                    if blocked_primary.is_enabled(timeout=500):
+                                        advance = blocked_primary
+                                except Exception:
+                                    pass
+
+                        if advance is None:
+                            # Fallback: pick any visible primary modal action button,
+                            # then retry prefill in case required custom controls are still empty.
+                            for sel in [
+                                "button.artdeco-button--primary",
+                            ]:
+                                try:
+                                    cand = advance_root.locator(sel).last
+                                    if cand.count() > 0 and cand.is_visible(timeout=500):
+                                        if cand.is_enabled(timeout=500):
+                                            advance = cand
+                                            break
+                                        _prefill_required_for_scan(page, scope=modal_scope)
+                                        page.wait_for_timeout(500)
+                                        if cand.is_enabled(timeout=500):
+                                            advance = cand
+                                            break
+                                except Exception:
+                                    continue
+
+                        if advance is None:
+                            try:
+                                visible_candidates = advance_root.locator(
+                                    "button:has(span.artdeco-button__text)"
+                                ).filter(has_text=re.compile(r"next|continue|review|التالي|الاستمرار|مراجعة", re.IGNORECASE))
+                                self.logger.info(
+                                    f"Scan step {_step}: no enabled advance button found; "
+                                    f"visible candidates={visible_candidates.count()}"
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                dbg_buttons = advance_root.locator("button")
+                                dbg_count = dbg_buttons.count()
+                                self.logger.info(f"Scan step {_step}: debug button count={dbg_count}")
+                                for i in range(min(dbg_count, 8)):
+                                    try:
+                                        b = dbg_buttons.nth(i)
+                                        t = (b.inner_text(timeout=200) or "").strip()
+                                        a = (b.get_attribute("aria-label", timeout=200) or "").strip()
+                                        c = (b.get_attribute("class", timeout=200) or "").strip()
+                                        v = b.is_visible(timeout=200)
+                                        e = b.is_enabled(timeout=200)
+                                        self.logger.info(
+                                            f"Scan step {_step}: btn[{i}] visible={v} enabled={e} text={t!r} aria={a!r} class={c!r}"
+                                        )
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+                            self.logger.info(f"Scan step {_step}: no advance button found, stopping wizard walk")
                             break
                         btn_text = (advance.inner_text(timeout=2000) or "").strip().lower()
+                        try:
+                            btn_aria = (advance.get_attribute("aria-label", timeout=1000) or "").strip().lower()
+                        except Exception:
+                            btn_aria = ""
+                        self.logger.info(f"Scan step {_step}: advance button text={btn_text!r}")
+                        self.logger.info(f"Scan step {_step}: advance button aria={btn_aria!r}")
                         # Stop before Submit – we don't want to actually submit
-                        if "submit" in btn_text:
+                        if _is_submit_action(btn_text, btn_aria):
+                            break
+                        if not _is_advance_action(btn_text, btn_aria):
+                            self.logger.info(f"Scan step {_step}: action is not an advance action, stopping")
                             break
                         advance.click(timeout=5000)
                         page.wait_for_timeout(1200)
@@ -2221,6 +2852,8 @@ class TelegramJobSession:
                     for dismiss_sel in [
                         "button[aria-label*='Dismiss']",
                         "button[aria-label*='Close']",
+                        "button[aria-label*='إغلاق']",
+                        "button[aria-label*='رفض']",
                         ".artdeco-modal__dismiss",
                     ]:
                         try:
@@ -2560,7 +3193,8 @@ class TelegramJobSession:
         # ── Scan the actual form before asking anything ───────────────────────
         self._send(
             f"🔍 Scanning the Easy Apply form for <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>…\n"
-            "This opens a browser briefly. I'll ask only the questions the form actually needs."
+            f"This opens a browser briefly in <b>{html.escape(self._easy_apply_run_mode)}</b> mode. "
+            "I'll ask only the questions the form actually needs."
         )
         try:
             scanned = self._scan_easy_apply_fields(job_url)
@@ -2816,6 +3450,8 @@ class TelegramJobSession:
                         headless=False,  # Show browser so user can handle captchas/MFA
                         viewport={"width": 1440, "height": 900},
                         slow_mo=150,
+                        locale="en-US",
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                     )
                 except (target_closed_error, Exception) as exc:
                     self.logger.warning(f"LinkedIn Easy Apply: primary profile failed ({exc}), using fallback")
@@ -2826,6 +3462,8 @@ class TelegramJobSession:
                         headless=False,
                         viewport={"width": 1440, "height": 900},
                         slow_mo=150,
+                        locale="en-US",
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                     )
 
                 try:
@@ -2839,7 +3477,13 @@ class TelegramJobSession:
 
                     # ── Step 2: Click Easy Apply button ───────────────────────────
                     easy_apply_selectors = [
+                        ".jobs-apply-button",
+                        "a.jobs-apply-button",
                         "button.jobs-apply-button",
+                        "[data-control-name*='jobdetails_topcard_inapply']",
+                        "[data-control-name*='jobdetails_topcard_inapply'] button",
+                        ".jobs-apply-button--top-card",
+                        ".jobs-s-apply [role='button']",
                         "button:has-text('Easy Apply')",
                         "button[aria-label*='Easy Apply']",
                         ".jobs-s-apply button",
@@ -3248,6 +3892,7 @@ def run_telegram_notify(
     logger: logging.Logger,
     bot_token: Optional[str] = None,
     chat_id: Optional[int] = None,
+    easy_apply_run_mode: str = "normal",
 ) -> None:
     """
     Start an interactive Telegram session.  Reads BOT_TOKEN and CHAT_ID from
@@ -3279,6 +3924,7 @@ def run_telegram_notify(
         new_jobs=new_jobs,
         query=query,
         logger=logger,
+        easy_apply_run_mode=easy_apply_run_mode,
     )
     session.run()
 
@@ -3379,6 +4025,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Telegram chat ID (overrides TELEGRAM_CHAT_ID env var)",
     )
+    parser.add_argument(
+        "--easy-apply-run-mode",
+        type=str,
+        choices=["normal", "testing"],
+        default="normal",
+        help="Easy Apply scan traversal mode: normal or testing",
+    )
     return parser.parse_args()
 
 
@@ -3444,6 +4097,7 @@ def main() -> None:
                 logger=agent.logger,
                 bot_token=args.telegram_bot_token,
                 chat_id=args.telegram_chat_id,
+                easy_apply_run_mode=args.easy_apply_run_mode,
             )
         finally:
             agent.db.close()
