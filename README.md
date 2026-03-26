@@ -17,7 +17,8 @@ Run one command to:
 2. browse DB jobs automatically,
 3. open Apply on Agoda,
 4. answer cover letter with `none`,
-5. print and save the application summary.
+5. open LinkedIn Easy Apply, fill fields from tester answers, and stop on final review (no submit),
+6. print and save the application summary.
 
 ### Quick run (recommended)
 
@@ -25,6 +26,8 @@ Run one command to:
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 .\run_auto_agoda_test.ps1
 ```
+
+By default, this run sends `Preview` after summary: LinkedIn opens, fields are filled, and the flow pauses on the final submit page. Close the browser window after reviewing to let the runner finish.
 
 ### Useful options
 
@@ -34,6 +37,12 @@ Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 
 # Skip scrape, only run DB/apply automation
 .\run_auto_agoda_test.ps1 -NoScrape
+
+# Mirror tester ↔ job-seeker chat into Telegram
+.\run_auto_agoda_test.ps1 -NoScrape -MirrorToTelegram
+
+# Opt out of preview mode and keep old summary-only completion
+.\run_auto_agoda_test.ps1 -NoScrape -NoPreviewBeforeSubmit
 
 # Force legacy conservative scan behavior
 .\run_auto_agoda_test.ps1 -EasyApplyRunMode normal
@@ -46,3 +55,4 @@ Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 
 - Console prints `[TEST][PASS]`/`[TEST][FAIL]`
 - Summary file path: `Tests/Samples/auto_agoda_summary.txt`
+- Full simulated chat transcript path: `Tests/Samples/auto_agoda_chat_transcript.txt`

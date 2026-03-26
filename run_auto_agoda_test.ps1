@@ -4,6 +4,8 @@ Param(
     [string]$Query = "Senior C# Developer Israel",
     [ValidateSet("normal", "testing")]
     [string]$EasyApplyRunMode = "testing",
+    [switch]$NoPreviewBeforeSubmit,
+    [switch]$MirrorToTelegram,
     [switch]$NoScrape,
     [switch]$Headed
 )
@@ -41,6 +43,14 @@ if (-not $NoScrape) {
     if (-not $Headed) {
         $argsList += "--headless-scrape"
     }
+}
+
+if ($MirrorToTelegram) {
+    $argsList += "--mirror-to-telegram"
+}
+
+if (-not $NoPreviewBeforeSubmit) {
+    $argsList += "--preview-before-submit"
 }
 
 Write-Host "[RUNNER] Starting auto test..." -ForegroundColor Cyan

@@ -1723,9 +1723,11 @@ class TelegramJobSession:
 
     Commands (case-insensitive)
     ---------------------------
-    next    – send next pending job; leave current at Discovered
+    next            – send next pending job; leave current at Discovered
+    next <name>     – jump to next job whose title/company/url contains <name>
     apply   – start application Q&A flow (collects data, then shows summary)
     submit  – (after summary) fill & submit LinkedIn Easy Apply form; mark Applied only on success
+    preview – (after summary) fill LinkedIn Easy Apply form and stop before Submit for visual review
     skip    – mark current job Skipped
     done    – terminate session (process exits)
     db      – switch to DB-browse mode; send jobs one by one
@@ -1821,8 +1823,9 @@ class TelegramJobSession:
             self.logger.warning(f"Telegram send failed: {exc}")
 
     def _send_document(self, filename: str, content: bytes, caption: str = "") -> None:
-        """Send a file (e.g. HTML) via the Bot API using multipart/form-data."""
+        """Send a file via the Bot API using multipart/form-data."""
         import urllib.request
+        import mimetypes
         import uuid
         boundary = uuid.uuid4().hex
         CRLF = b"\r\n"
@@ -1834,13 +1837,14 @@ class TelegramJobSession:
                 f"{value}\r\n"
             ).encode("utf-8")
 
+        guessed_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         body = (
             part_field("chat_id", str(self.chat_id))
             + (part_field("caption", caption) if caption else b"")
             + (
                 f"--{boundary}\r\n"
                 f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
-                f"Content-Type: text/html\r\n\r\n"
+                f"Content-Type: {guessed_type}\r\n\r\n"
             ).encode("utf-8")
             + content
             + CRLF
@@ -1857,6 +1861,45 @@ class TelegramJobSession:
                 pass
         except Exception as exc:
             self.logger.warning(f"Telegram sendDocument failed: {exc}")
+
+    def _send_photo(self, filename: str, content: bytes, caption: str = "") -> None:
+        """Send an image via Telegram Bot API sendPhoto."""
+        import urllib.request
+        import uuid
+
+        boundary = uuid.uuid4().hex
+        CRLF = b"\r\n"
+
+        def part_field(name: str, value: str) -> bytes:
+            return (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+
+        body = (
+            part_field("chat_id", str(self.chat_id))
+            + (part_field("caption", caption) if caption else b"")
+            + (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="photo"; filename="{filename}"\r\n'
+                f"Content-Type: image/png\r\n\r\n"
+            ).encode("utf-8")
+            + content
+            + CRLF
+            + f"--{boundary}--\r\n".encode("utf-8")
+        )
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30):
+                pass
+        except Exception as exc:
+            self.logger.warning(f"Telegram sendPhoto failed: {exc}")
 
     def _get_updates(self, offset: int, timeout: int = 20) -> List[Dict]:
         """Long-poll for new messages."""
@@ -1907,6 +1950,93 @@ class TelegramJobSession:
             self._profile_path.write_text(json.dumps(root, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:
             self.logger.warning(f"Failed to persist Telegram profile: {exc}")
+
+    def _scan_is_radio_selected(self, radio_input: Any) -> bool:
+        try:
+            return radio_input.is_checked(timeout=200)
+        except Exception:
+            try:
+                checked_attr = (radio_input.get_attribute("checked", timeout=200) or "").strip().lower()
+                return checked_attr in {"checked", "true", "1"}
+            except Exception:
+                return False
+
+    def _scan_try_select_radio_input(
+        self,
+        radio_input: Any,
+        root: Any,
+        question_label: str = "",
+        testing_mode: bool = False,
+    ) -> bool:
+        try:
+            radio_input.check(timeout=700)
+            if testing_mode:
+                self.logger.info(
+                    f"Scan prefill radio: selected via check()"
+                    f"{f' | question={question_label!r}' if question_label else ''}"
+                )
+            return True
+        except Exception:
+            pass
+        try:
+            radio_input.click(timeout=700)
+            if testing_mode:
+                self.logger.info(
+                    f"Scan prefill radio: selected via direct click()"
+                    f"{f' | question={question_label!r}' if question_label else ''}"
+                )
+            return True
+        except Exception:
+            pass
+        try:
+            radio_id = (radio_input.get_attribute("id", timeout=200) or "").strip()
+            if radio_id:
+                lbl = root.locator(f"label[for='{radio_id}']").first
+                if lbl.count() > 0 and lbl.is_visible(timeout=200):
+                    lbl.click(timeout=700)
+                    if testing_mode:
+                        self.logger.info(
+                            f"Scan prefill radio: selected via label[for] fallback"
+                            f"{f' | question={question_label!r}' if question_label else ''}"
+                        )
+                    return True
+        except Exception:
+            pass
+        try:
+            wrapper = radio_input.locator("xpath=ancestor::label[1]").first
+            if wrapper.count() > 0 and wrapper.is_visible(timeout=200):
+                wrapper.click(timeout=700)
+                if testing_mode:
+                    self.logger.info(
+                        f"Scan prefill radio: selected via ancestor<label> fallback"
+                        f"{f' | question={question_label!r}' if question_label else ''}"
+                    )
+                return True
+        except Exception:
+            pass
+        if testing_mode:
+            self.logger.info(
+                f"Scan prefill radio: failed to select any option"
+                f"{f' | question={question_label!r}' if question_label else ''}"
+            )
+        return False
+
+    def _scan_pick_visible_radio_indexes(self, group: Any, root: Any) -> List[int]:
+        choices: List[int] = []
+        for idx in range(group.count()):
+            try:
+                candidate = group.nth(idx)
+                if candidate.is_visible(timeout=150):
+                    choices.append(idx)
+                    continue
+                rid = (candidate.get_attribute("id", timeout=150) or "").strip()
+                if rid:
+                    rl = root.locator(f"label[for='{rid}']").first
+                    if rl.count() > 0 and rl.is_visible(timeout=150):
+                        choices.append(idx)
+            except Exception:
+                continue
+        return choices
 
     # ------------------------------------------------------------------
     # Dynamic form-field discovery
@@ -2241,70 +2371,6 @@ class TelegramJobSession:
             never reaches Submit (loop breaks before submit click).
             """
             root = scope if scope is not None else page
-
-            def _is_radio_selected(radio_input: Any) -> bool:
-                try:
-                    return radio_input.is_checked(timeout=200)
-                except Exception:
-                    try:
-                        checked_attr = (radio_input.get_attribute("checked", timeout=200) or "").strip().lower()
-                        return checked_attr in {"checked", "true", "1"}
-                    except Exception:
-                        return False
-
-            def _try_select_radio_input(radio_input: Any, question_label: str = "") -> bool:
-                try:
-                    radio_input.check(timeout=700)
-                    if testing_mode:
-                        self.logger.info(
-                            f"Scan prefill radio: selected via check()"
-                            f"{f' | question={question_label!r}' if question_label else ''}"
-                        )
-                    return True
-                except Exception:
-                    pass
-                try:
-                    radio_input.click(timeout=700)
-                    if testing_mode:
-                        self.logger.info(
-                            f"Scan prefill radio: selected via direct click()"
-                            f"{f' | question={question_label!r}' if question_label else ''}"
-                        )
-                    return True
-                except Exception:
-                    pass
-                try:
-                    radio_id = (radio_input.get_attribute("id", timeout=200) or "").strip()
-                    if radio_id:
-                        lbl = root.locator(f"label[for='{radio_id}']").first
-                        if lbl.count() > 0 and lbl.is_visible(timeout=200):
-                            lbl.click(timeout=700)
-                            if testing_mode:
-                                self.logger.info(
-                                    f"Scan prefill radio: selected via label[for] fallback"
-                                    f"{f' | question={question_label!r}' if question_label else ''}"
-                                )
-                            return True
-                except Exception:
-                    pass
-                try:
-                    wrapper = radio_input.locator("xpath=ancestor::label[1]").first
-                    if wrapper.count() > 0 and wrapper.is_visible(timeout=200):
-                        wrapper.click(timeout=700)
-                        if testing_mode:
-                            self.logger.info(
-                                f"Scan prefill radio: selected via ancestor<label> fallback"
-                                f"{f' | question={question_label!r}' if question_label else ''}"
-                            )
-                        return True
-                except Exception:
-                    pass
-                if testing_mode:
-                    self.logger.info(
-                        f"Scan prefill radio: failed to select any option"
-                        f"{f' | question={question_label!r}' if question_label else ''}"
-                    )
-                return False
             # Fill empty text-like controls
             text_like = (
                 "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], "
@@ -2462,7 +2528,7 @@ class TelegramJobSession:
                     for idx in range(radios.count()):
                         try:
                             r = radios.nth(idx)
-                            if _is_radio_selected(r):
+                            if self._scan_is_radio_selected(r):
                                 already_selected = True
                                 break
                         except Exception:
@@ -2487,7 +2553,12 @@ class TelegramJobSession:
                         pick_idx = random.choice(choices) if testing_mode else choices[0]
                         try:
                             r = radios.nth(pick_idx)
-                            _try_select_radio_input(r, _label_for(page, r))
+                            self._scan_try_select_radio_input(
+                                radio_input=r,
+                                root=root,
+                                question_label=_label_for(page, r),
+                                testing_mode=testing_mode,
+                            )
                         except Exception:
                             pass
                 except Exception:
@@ -2502,26 +2573,18 @@ class TelegramJobSession:
                         continue
                     radio_names.add(name)
                     group = root.locator(f"input[type='radio'][name='{name}']")
-                    choices: List[int] = []
-                    for idx in range(group.count()):
-                        try:
-                            candidate = group.nth(idx)
-                            if candidate.is_visible(timeout=150):
-                                choices.append(idx)
-                                continue
-                            rid = (candidate.get_attribute("id", timeout=150) or "").strip()
-                            if rid:
-                                rl = root.locator(f"label[for='{rid}']").first
-                                if rl.count() > 0 and rl.is_visible(timeout=150):
-                                    choices.append(idx)
-                        except Exception:
-                            continue
+                    choices = self._scan_pick_visible_radio_indexes(group=group, root=root)
                     if not choices:
                         continue
                     pick_idx = random.choice(choices) if testing_mode else choices[0]
                     target = group.nth(pick_idx)
-                    if not _is_radio_selected(target):
-                        _try_select_radio_input(target, _label_for(page, target))
+                    if not self._scan_is_radio_selected(target):
+                        self._scan_try_select_radio_input(
+                            radio_input=target,
+                            root=root,
+                            question_label=_label_for(page, target),
+                            testing_mode=testing_mode,
+                        )
                 except Exception:
                     continue
 
@@ -2589,7 +2652,8 @@ class TelegramJobSession:
                         user_data_dir=primary_profile,
                         channel="chrome",
                         headless=False,
-                        viewport={"width": 1440, "height": 900},
+                        no_viewport=True,
+                        args=["--start-maximized"],
                         slow_mo=100,
                         locale="en-US",
                         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
@@ -2601,7 +2665,8 @@ class TelegramJobSession:
                         user_data_dir=fallback_profile,
                         channel="chrome",
                         headless=False,
-                        viewport={"width": 1440, "height": 900},
+                        no_viewport=True,
+                        args=["--start-maximized"],
                         slow_mo=100,
                         locale="en-US",
                         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
@@ -2609,6 +2674,10 @@ class TelegramJobSession:
                 try:
                     page = ctx.pages[0] if ctx.pages else ctx.new_page()
                     page.set_default_timeout(20000)
+                    try:
+                        page.bring_to_front()
+                    except Exception:
+                        pass
 
                     page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
 
@@ -2710,7 +2779,7 @@ class TelegramJobSession:
                         self.logger.warning("Scan: modal scope not resolved, falling back to full page")
 
                     # Walk wizard steps (scan only – never submit)
-                    max_steps = 10
+                    max_steps = 20
                     for _step in range(max_steps):
                         page.wait_for_timeout(800)
                         before = len(discovered)
@@ -2847,6 +2916,11 @@ class TelegramJobSession:
                             break
                         advance.click(timeout=5000)
                         page.wait_for_timeout(1200)
+
+                    if len(discovered) > 0 and _step == max_steps - 1:
+                        self.logger.info(
+                            f"Scan: reached max_steps={max_steps}; traversal stopped with {len(discovered)} discovered fields"
+                        )
 
                     # Close modal / dismiss
                     for dismiss_sel in [
@@ -3067,7 +3141,9 @@ class TelegramJobSession:
         Process a single user message.  Returns True if session should
         continue, False if it should terminate (Done).
         """
-        cmd = raw.strip().lower()
+        command_text = raw.strip()
+        cmd = command_text.lower()
+        cmd_name, cmd_arg = (cmd.split(maxsplit=1) + [""])[:2] if cmd else ("", "")
         abort_aliases = {"cancel", "quit", "abort", "stop", "give up", "giveup"}
 
         # --- In-progress apply guard -----------------------------------------
@@ -3079,14 +3155,17 @@ class TelegramJobSession:
             if self._state == self.STATE_APPLY_CONFIRM:
                 if cmd == "submit":
                     return self._cmd_submit_apply()
+                if cmd in {"preview", "review"}:
+                    return self._cmd_preview_apply()
                 jid = self._apply_in_progress_job_id
                 self._send(
-                    f"⚠️ Review the summary above and reply <b>Submit</b> to proceed or <b>Cancel</b> to abort."
+                    "⚠️ Review the summary above and reply <b>Preview</b> to open/fill and stop before submit, "
+                    "<b>Submit</b> to apply now, or <b>Cancel</b> to abort."
                 )
                 return True
 
             # Still in Q&A phase — block navigation commands
-            if cmd in {"next", "apply", "skip", "db", "done", "submit"}:
+            if cmd_name in {"next", "apply", "skip", "db", "done", "submit", "preview", "review"}:
                 jid = self._apply_in_progress_job_id
                 self._send(
                     f"⚠️ Job application for job ID <code>{jid}</code> is still in progress.\n"
@@ -3097,9 +3176,9 @@ class TelegramJobSession:
             return self._handle_apply_answer(raw.strip())
 
         # --- Global commands -------------------------------------------------
-        if cmd == "done":
+        if cmd_name == "done":
             return self._cmd_done()
-        if cmd == "db":
+        if cmd_name == "db":
             return self._cmd_db()
         if cmd in {"reset profile", "resetprofile"}:
             self._saved_profile = {}
@@ -3115,17 +3194,17 @@ class TelegramJobSession:
         current_idx    = self._new_job_idx if self._state == self.STATE_BROWSING_NEW else self._db_job_idx
         in_browse_mode = self._state in (self.STATE_BROWSING_NEW, self.STATE_BROWSING_DB)
 
-        if cmd == "next":
-            return self._cmd_next()
-        if cmd == "apply":
+        if cmd_name == "next":
+            return self._cmd_next(cmd_arg)
+        if cmd_name == "apply":
             return self._cmd_apply()
-        if cmd == "skip":
+        if cmd_name == "skip":
             return self._cmd_skip()
 
         # Unrecognised
         self._send(
             "❓ Unknown command.\n"
-            "Available: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b> | <b>db</b> | <b>Cancel</b>/<b>Quit</b>"
+            "Available: <b>Next</b> | <b>Next &lt;name&gt;</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b> | <b>db</b> | <b>Cancel</b>/<b>Quit</b>"
         )
         return True
 
@@ -3151,11 +3230,33 @@ class TelegramJobSession:
         self._send(self._db_card_text(self._current_job, 1, total))
         return True
 
-    def _cmd_next(self) -> bool:
+    def _job_matches_name(self, job: Dict, name_query: str) -> bool:
+        if not name_query:
+            return True
+        query = name_query.strip().lower()
+        if not query:
+            return True
+        title = str(job.get("title") or "").lower()
+        company = str(job.get("company") or "").lower()
+        url = str(job.get("url") or "").lower()
+        return query in title or query in company or query in url
+
+    def _cmd_next(self, name_query: str = "") -> bool:
         # Leave current job at its current status (Discovered stays Discovered)
+        filter_name = (name_query or "").strip()
+
         if self._state == self.STATE_BROWSING_NEW:
-            self._new_job_idx += 1
+            next_idx = self._new_job_idx + 1
+            while next_idx < len(self.new_jobs) and not self._job_matches_name(self.new_jobs[next_idx], filter_name):
+                next_idx += 1
+            self._new_job_idx = next_idx
             if self._new_job_idx >= len(self.new_jobs):
+                if filter_name:
+                    self._send(
+                        f"🔎 No more new jobs matched <b>{html.escape(filter_name)}</b>.\n"
+                        "Reply <b>db</b> to browse all DB jobs, or <b>Done</b> to finish."
+                    )
+                    return True
                 self._send("✅ No more new jobs from this run.\nReply <b>db</b> to browse all DB jobs, or <b>Done</b> to finish.")
                 self._state = self.STATE_INTRO
                 self._current_job = None
@@ -3166,8 +3267,14 @@ class TelegramJobSession:
             return True
 
         if self._state == self.STATE_BROWSING_DB:
-            self._db_job_idx += 1
+            next_idx = self._db_job_idx + 1
+            while next_idx < len(self._db_jobs) and not self._job_matches_name(self._db_jobs[next_idx], filter_name):
+                next_idx += 1
+            self._db_job_idx = next_idx
             if self._db_job_idx >= len(self._db_jobs):
+                if filter_name:
+                    self._send(f"🔎 No more DB jobs matched <b>{html.escape(filter_name)}</b>.\nReply <b>Done</b> to finish.")
+                    return True
                 self._send("✅ No more jobs in the database.\nReply <b>Done</b> to finish.")
                 self._state = self.STATE_INTRO
                 self._current_job = None
@@ -3177,8 +3284,38 @@ class TelegramJobSession:
             self._send(self._db_card_text(self._current_job, self._db_job_idx + 1, total))
             return True
 
-        # INTRO state – treat as "start browsing new jobs"
-        self._send("💡 Tip: Reply <b>Next</b> again to start browsing new jobs, or <b>db</b> to browse all DB jobs.")
+        # INTRO state – support direct filtered search in new jobs then DB jobs
+        if filter_name:
+            if self.new_jobs:
+                start_new_idx = self._new_job_idx if self._state == self.STATE_BROWSING_NEW else 0
+                for idx in range(start_new_idx, len(self.new_jobs)):
+                    if self._job_matches_name(self.new_jobs[idx], filter_name):
+                        self._state = self.STATE_BROWSING_NEW
+                        self._new_job_idx = idx
+                        self._current_job = self.new_jobs[idx]
+                        self._send(self._job_card_text(self._current_job, idx + 1, len(self.new_jobs)))
+                        return True
+
+            db_jobs = [
+                j for j in self.db.get_all_jobs()
+                if j.get("title") != "Unknown title" and j.get("company") != "Unknown company"
+            ]
+            for idx, job in enumerate(db_jobs):
+                if self._job_matches_name(job, filter_name):
+                    self._db_jobs = db_jobs
+                    self._db_job_idx = idx
+                    self._state = self.STATE_BROWSING_DB
+                    self._current_job = job
+                    self._send(self._db_card_text(job, idx + 1, len(db_jobs)))
+                    return True
+
+            self._send(
+                f"🔎 Couldn't find any job matching <b>{html.escape(filter_name)}</b> in new jobs or DB.\n"
+                "Reply <b>Next</b> to browse new jobs, or <b>db</b> for full DB browsing."
+            )
+            return True
+
+        self._send("💡 Tip: Reply <b>Next</b> to browse new jobs, <b>Next &lt;name&gt;</b> to filter, or <b>db</b> to browse all DB jobs.")
         return True
 
     def _cmd_apply(self) -> bool:
@@ -3367,10 +3504,45 @@ class TelegramJobSession:
             f"🔗 {html.escape(url)}\n\n"
             + submission_section
             + "\n\n"
-            "Reply <b>Submit</b> to fill &amp; submit the form on LinkedIn, "
+            "Reply <b>Preview</b> to fill and stop on the final review page (no submit), "
+            "or <b>Submit</b> to fill &amp; submit the form on LinkedIn, "
             "or <b>Cancel</b> to abort."
         )
         self._state = self.STATE_APPLY_CONFIRM
+        return True
+
+    def _cmd_preview_apply(self) -> bool:
+        """User requested preview mode: fill form and stop on final review step without submitting."""
+        job = self._current_job or {}
+        title = job.get("title", "?")
+        company = job.get("company", "?")
+        job_url = job.get("url", "")
+        answers = self._apply_answers
+
+        self._send(
+            f"👀 Opening LinkedIn and filling the application for <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>.\n"
+            "I will stop at the final submit page without submitting."
+        )
+        self.logger.info(f"Telegram: Starting LinkedIn Easy Apply preview for {title} @ {company}")
+
+        success, message = self._do_linkedin_easy_apply(
+            job_url,
+            answers,
+            submit_application=False,
+        )
+        if success:
+            self._send(
+                "✅ <b>Preview ready.</b> The form is filled and paused before submit for your visual review.\n"
+                f"{html.escape(message)}\n\n"
+                "Status remains unchanged. Reply <b>Submit</b> to perform a real submission, or <b>Cancel</b> to abort."
+            )
+            return True
+
+        self._send(
+            f"❌ <b>Preview failed.</b>\n"
+            f"{html.escape(message)}\n\n"
+            "Reply <b>Preview</b> to retry, <b>Submit</b> to try direct submit, or <b>Cancel</b>."
+        )
         return True
 
     def _cmd_submit_apply(self) -> bool:
@@ -3385,7 +3557,7 @@ class TelegramJobSession:
         self._send(f"⏳ Opening LinkedIn and submitting your application for <b>{html.escape(title)}</b>…")
         self.logger.info(f"Telegram: Starting LinkedIn Easy Apply for job {job_id} ({title} @ {company})")
 
-        success, message = self._do_linkedin_easy_apply(job_url, answers)
+        success, message = self._do_linkedin_easy_apply(job_url, answers, submit_application=True)
 
         if success:
             try:
@@ -3418,10 +3590,18 @@ class TelegramJobSession:
         self._state = self._return_state_after_apply
         return True
 
-    def _do_linkedin_easy_apply(self, job_url: str, answers: Dict[str, str]) -> Tuple[bool, str]:
+    def _do_linkedin_easy_apply(
+        self,
+        job_url: str,
+        answers: Dict[str, str],
+        submit_application: bool = True,
+    ) -> Tuple[bool, str]:
         """
-        Open the LinkedIn job page, click Easy Apply, fill out the modal form
-        using the collected answers, and submit.
+        Open the LinkedIn job page, click Easy Apply, and fill out the modal form
+        using the collected answers.
+
+        If submit_application=True, click submit and mark success on completion.
+        If submit_application=False, stop on final review page without clicking submit.
 
         Returns (success: bool, message: str).
         """
@@ -3448,7 +3628,8 @@ class TelegramJobSession:
                         user_data_dir=primary_profile,
                         channel="chrome",
                         headless=False,  # Show browser so user can handle captchas/MFA
-                        viewport={"width": 1440, "height": 900},
+                        no_viewport=True,
+                        args=["--start-maximized"],
                         slow_mo=150,
                         locale="en-US",
                         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
@@ -3460,7 +3641,8 @@ class TelegramJobSession:
                         user_data_dir=fallback_profile,
                         channel="chrome",
                         headless=False,
-                        viewport={"width": 1440, "height": 900},
+                        no_viewport=True,
+                        args=["--start-maximized"],
                         slow_mo=150,
                         locale="en-US",
                         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
@@ -3469,6 +3651,10 @@ class TelegramJobSession:
                 try:
                     page = ctx.pages[0] if ctx.pages else ctx.new_page()
                     page.set_default_timeout(20000)
+                    try:
+                        page.bring_to_front()
+                    except Exception:
+                        pass
 
                     # ── Step 1: Navigate to job page ──────────────────────────────
                     self.logger.info(f"Easy Apply: navigating to {job_url}")
@@ -3487,18 +3673,35 @@ class TelegramJobSession:
                         "button:has-text('Easy Apply')",
                         "button[aria-label*='Easy Apply']",
                         ".jobs-s-apply button",
+                        "[role='button']:has-text('Easy Apply')",
+                        "a:has-text('Easy Apply')",
+                        "span:has-text('Easy Apply')",
                     ]
+                    try:
+                        page.wait_for_selector(", ".join(easy_apply_selectors), timeout=8000)
+                        self.logger.info("Easy Apply: apply element detected in DOM")
+                    except Exception:
+                        self.logger.warning("Easy Apply: wait_for_selector timed out for apply button")
+
                     clicked = False
-                    for sel in easy_apply_selectors:
-                        try:
-                            btn = page.locator(sel).first
-                            if btn.count() > 0 and btn.is_visible(timeout=3000):
-                                btn.click(timeout=5000)
-                                clicked = True
-                                self.logger.info("Easy Apply: clicked Easy Apply button")
-                                break
-                        except Exception:
-                            continue
+                    for attempt in range(3):
+                        if attempt > 0:
+                            page.wait_for_timeout(1500)
+                        for sel in easy_apply_selectors:
+                            try:
+                                btn = page.locator(sel).first
+                                if btn.count() > 0 and btn.is_visible(timeout=3000):
+                                    btn.click(timeout=5000)
+                                    clicked = True
+                                    self.logger.info(
+                                        f"Easy Apply: clicked Easy Apply button via {sel!r} "
+                                        f"(attempt {attempt + 1})"
+                                    )
+                                    break
+                            except Exception:
+                                continue
+                        if clicked:
+                            break
 
                     if not clicked:
                         # Check if it's an external application
@@ -3514,7 +3717,7 @@ class TelegramJobSession:
 
                     # ── Step 3: Fill the modal form ───────────────────────────────
                     # The Easy Apply modal is a multi-step wizard. We iterate pages.
-                    max_modal_steps = 10
+                    max_modal_steps = 20
                     for step_num in range(max_modal_steps):
                         self.logger.info(f"Easy Apply: filling modal step {step_num + 1}")
                         page.wait_for_timeout(1000)
@@ -3530,7 +3733,13 @@ class TelegramJobSession:
                         btn_text = (next_btn.inner_text(timeout=3000) or "").strip().lower()
                         self.logger.info(f"Easy Apply: modal button text = {btn_text!r}")
 
-                        if "submit" in btn_text:
+                        is_submit_action = any(tok in btn_text for tok in ["submit", "تقديم", "إرسال", "ارسال"])
+
+                        if is_submit_action and not submit_application:
+                            self.logger.info("Easy Apply: reached submit step in preview mode; not clicking submit")
+                            return True, "Preview stopped at final submit step (no submit clicked)."
+
+                        if is_submit_action and submit_application:
                             next_btn.click(timeout=10000)
                             self.logger.info("Easy Apply: clicked Submit button")
                             page.wait_for_timeout(3000)
@@ -3558,11 +3767,17 @@ class TelegramJobSession:
                             self.logger.info("Easy Apply: modal closed after Submit – treating as success")
                             return True, "Application submitted (modal closed after Submit)."
 
-                        elif "next" in btn_text or "review" in btn_text or "continue" in btn_text:
+                        elif "next" in btn_text or "review" in btn_text or "continue" in btn_text or "التالي" in btn_text or "مراجعة" in btn_text or "الاستمرار" in btn_text:
                             next_btn.click(timeout=5000)
                         else:
                             # Unknown button — click it and hope for the best
                             next_btn.click(timeout=5000)
+
+                    if not submit_application:
+                        return True, (
+                            f"Preview stopped after {max_modal_steps} wizard steps "
+                            "(submit step not reached automatically)."
+                        )
 
                     return False, f"Easy Apply wizard exceeded {max_modal_steps} steps without submitting."
 

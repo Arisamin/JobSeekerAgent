@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import os
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -27,6 +29,9 @@ class AutoAgodaTestAgent:
         max_jobs: int,
         query: str,
         easy_apply_run_mode: str,
+        preview_before_submit: bool,
+        mirror_to_telegram: bool,
+        telegram_bot_token: Optional[str],
     ):
         self.base_dir = base_dir
         self.chat_id = chat_id
@@ -37,15 +42,65 @@ class AutoAgodaTestAgent:
         self.query = query
         mode = (easy_apply_run_mode or "testing").strip().lower()
         self.easy_apply_run_mode = mode if mode in {"normal", "testing"} else "testing"
+        self.preview_before_submit = preview_before_submit
+        self.mirror_to_telegram = mirror_to_telegram
+        self.telegram_bot_token = (telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
 
         self.logger = engine.build_logger(base_dir)
         self.db = engine.ProcessedJobsDB(base_dir / "processed_jobs.db")
         self.session: Optional[engine.TelegramJobSession] = None
         self.messages: List[str] = []
+        self.chat_transcript_lines: List[str] = []
+
+    def _send_telegram_message(self, text: str) -> None:
+        if not self.mirror_to_telegram:
+            return
+        if not self.telegram_bot_token:
+            raise RuntimeError("mirror-to-telegram enabled but TELEGRAM_BOT_TOKEN is missing")
+
+        payload = json.dumps(
+            {
+                "chat_id": self.chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+            }
+        ).encode("utf-8")
+        url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+
+    def _send_telegram_chunked(self, text: str) -> None:
+        if not self.mirror_to_telegram:
+            return
+        clean = (text or "").strip()
+        if not clean:
+            return
+        max_len = 3500
+        chunks = [clean[i:i + max_len] for i in range(0, len(clean), max_len)]
+        for chunk in chunks:
+            self._send_telegram_message(chunk)
+
+    def _mirror_chat_message(self, speaker: str, text: str) -> None:
+        if not self.mirror_to_telegram:
+            return
+        prefix = "🤖 JobSeeker" if speaker == "JOB-SEEKER" else "🧪 Tester"
+        self._send_telegram_chunked(f"{prefix}\n{text}")
 
     def _send_capture(self, text: str, parse_mode: str = "HTML") -> None:
         _ = parse_mode
         self.messages.append(text)
+        plain = self._render_plain(text)
+        self.chat_transcript_lines.append(f"[JOB-SEEKER]\n{plain}\n")
+        self._mirror_chat_message("JOB-SEEKER", plain)
+
+    def _tester_send(self, command: str) -> None:
+        self.chat_transcript_lines.append(f"[TESTER]\n{command}\n")
+        self._mirror_chat_message("TESTER", command)
 
     def _render_plain(self, text: str) -> str:
         plain = html.unescape(text)
@@ -85,7 +140,7 @@ class AutoAgodaTestAgent:
 
     def _make_session(self) -> None:
         self.session = engine.TelegramJobSession(
-            bot_token="auto-test-token",
+              bot_token=self.telegram_bot_token or "auto-test-token",
             chat_id=self.chat_id,
             db=self.db,
             new_jobs=[],
@@ -153,10 +208,12 @@ class AutoAgodaTestAgent:
     def _drive_flow_to_target_apply(self) -> Tuple[bool, str]:
         assert self.session is not None
 
+        self.chat_transcript_lines.append("[INFO]\nAutomated chat simulation started\n")
         self.session.send_intro()
         self._print_new_messages(0)
 
         before = len(self.messages)
+        self._tester_send("db")
         self.session._handle_command("db")
         self._print_new_messages(before)
 
@@ -167,11 +224,13 @@ class AutoAgodaTestAgent:
                     f"\n[TEST] Target job reached: {job.get('title', '?')} @ {job.get('company', '?')}"
                 )
                 before = len(self.messages)
+                self._tester_send("apply")
                 self.session._handle_command("apply")
                 self._print_new_messages(before)
                 return True, ""
 
             before = len(self.messages)
+            self._tester_send("next")
             keep_going = self.session._handle_command("next")
             self._print_new_messages(before)
             if not keep_going:
@@ -205,6 +264,7 @@ class AutoAgodaTestAgent:
                 answer = "none"
 
             before = len(self.messages)
+            self._tester_send(answer)
             self.session._handle_command(answer)
             self._print_new_messages(before)
 
@@ -216,8 +276,25 @@ class AutoAgodaTestAgent:
                 return msg
         return None
 
+    def _run_preview_mode(self) -> Tuple[bool, str]:
+        assert self.session is not None
+
+        before = len(self.messages)
+        self._tester_send("preview")
+        self.session._handle_command("preview")
+        self._print_new_messages(before)
+
+        recent_plain = "\n".join(self._render_plain(m) for m in self.messages[max(0, len(self.messages) - 8):])
+        if "Preview ready." in recent_plain or "Preview stopped at final submit step." in recent_plain:
+            return True, ""
+        if "Preview failed." in recent_plain:
+            return False, "Preview command returned failure from seeker agent."
+        return True, ""
+
     def run(self) -> int:
         try:
+            if self.mirror_to_telegram:
+                self._send_telegram_message("🧪 Auto Agoda test started (tester ↔ job-seeker mirrored)")
             self._run_scraper_if_needed()
             self._make_session()
 
@@ -236,12 +313,26 @@ class AutoAgodaTestAgent:
                 print("\n[TEST][FAIL] Could not find 'Application Summary' in captured messages.")
                 return 1
 
+            if self.preview_before_submit:
+                ok, reason = self._run_preview_mode()
+                if not ok:
+                    print(f"\n[TEST][FAIL] {reason}")
+                    return 1
+
             summary_path = self.base_dir / "Tests" / "Samples" / "auto_agoda_summary.txt"
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             summary_path.write_text(self._render_plain(summary), encoding="utf-8")
 
+            transcript_path = self.base_dir / "Tests" / "Samples" / "auto_agoda_chat_transcript.txt"
+            transcript_path.write_text("\n".join(self.chat_transcript_lines), encoding="utf-8")
+
             print("\n[TEST][PASS] Captured application summary successfully.")
             print(f"[TEST] Summary saved to: {summary_path}")
+            print(f"[TEST] Chat transcript saved to: {transcript_path}")
+            if self.mirror_to_telegram:
+                self._send_telegram_message("✅ Auto Agoda test finished: PASS")
+                self._send_telegram_message(f"Summary file: {summary_path}")
+                self._send_telegram_message(f"Transcript file: {transcript_path}")
             print("\n===== SUMMARY =====")
             print(self._render_plain(summary))
             print("===================")
@@ -292,6 +383,21 @@ def parse_args() -> argparse.Namespace:
         default="testing",
         help="Easy Apply scan traversal mode for apply flow (default: testing)",
     )
+    parser.add_argument(
+        "--preview-before-submit",
+        action="store_true",
+        help="After summary, send Preview command to fill and stop on final submit page (no submit)",
+    )
+    parser.add_argument(
+        "--mirror-to-telegram",
+        action="store_true",
+        help="Mirror tester+job-seeker chat messages to Telegram during auto test",
+    )
+    parser.add_argument(
+        "--telegram-bot-token",
+        default=None,
+        help="Telegram bot token for mirror mode (falls back to TELEGRAM_BOT_TOKEN env var)",
+    )
     return parser.parse_args()
 
 
@@ -320,6 +426,9 @@ def main() -> int:
         max_jobs=args.max_jobs,
         query=args.query,
         easy_apply_run_mode=args.easy_apply_run_mode,
+        preview_before_submit=args.preview_before_submit,
+        mirror_to_telegram=args.mirror_to_telegram,
+        telegram_bot_token=args.telegram_bot_token,
     )
     return runner.run()
 
