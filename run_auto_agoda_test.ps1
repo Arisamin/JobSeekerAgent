@@ -4,7 +4,7 @@ Param(
     [string]$Query = "Senior C# Developer Israel",
     [ValidateSet("normal", "testing")]
     [string]$EasyApplyRunMode = "testing",
-    [switch]$NoPreviewBeforeSubmit,
+    [switch]$PreviewBeforeSubmit,
     [switch]$MirrorToTelegram,
     [switch]$NoScrape,
     [switch]$Headed
@@ -49,7 +49,7 @@ if ($MirrorToTelegram) {
     $argsList += "--mirror-to-telegram"
 }
 
-if (-not $NoPreviewBeforeSubmit) {
+if ($PreviewBeforeSubmit) {
     $argsList += "--preview-before-submit"
 }
 

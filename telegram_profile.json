@@ -1,0 +1,24 @@
+{
+  "chat_profiles": {
+    "1": {
+      "experience_years": "30"
+    },
+    "6128016116": {
+      "cv_path": "C:\\MyData\\Ariel CV - 2026 [2].pdf",
+      "full_name": "Aba Guba",
+      "email": "avram@gmail.com",
+      "phone": "0556745678",
+      "location": "jebalya",
+      "linkedin": "https://www.linkedin.com/in/ariel-samin-58a57b22/",
+      "experience_years": "60",
+      "notice_period": "1 month",
+      "salary_expectation": "30000",
+      "motivation": "I am happy",
+      "cover_letter_path": "",
+      "github": "https://github.com/Arisamin",
+      "website": "https://example.com",
+      "relocate_bangkok": "no",
+      "agoda_relationship": "no"
+    }
+  }
+}
