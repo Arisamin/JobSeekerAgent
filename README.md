@@ -10,6 +10,42 @@ Before every code-change iteration, follow `SKILL_CHECKLIST.md`.
 	- `FLOWCHART_SKIPPED_MAINTENANCE.md`
 	- `FLOWCHART_USER_DB_UPDATE.md`
 
+## Testing
+
+Run unit tests through the timeout wrapper so hangs fail fast and print diagnostics.
+
+### Full suite
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.venv\Scripts\python.exe Tests\_timeout_runner.py Tests\
+```
+
+### Specific test file
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.venv\Scripts\python.exe Tests\_timeout_runner.py Tests\test_session_patches.py
+```
+
+### Optional timeout overrides
+
+```powershell
+$env:PYTEST_HARD_TIMEOUT="180"
+$env:PYTEST_FAULTHANDLER_TIMEOUT="30"
+.venv\Scripts\python.exe Tests\_timeout_runner.py Tests\
+```
+
+### VS Code tasks
+
+- `tests: timeout (all)`
+- `tests: timeout (session patches)`
+
+### When timeout is reached
+
+- `pytest` prints faulthandler diagnostics after `PYTEST_FAULTHANDLER_TIMEOUT` seconds.
+- The wrapper then enforces the hard timeout (`PYTEST_HARD_TIMEOUT`), terminates the test process, and exits with code `124`.
+
 ## Auto Agoda test (no manual Telegram steps)
 
 Run one command to:

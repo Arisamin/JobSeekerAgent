@@ -103,6 +103,47 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertEqual(prompts_by_key["custom__text_q"], "✏️ Tell us about yourself:")
         self.assertEqual(prompts_by_key["custom__checkbox_q"], "❓ Accept terms (type your answer):")
 
+    def test_build_apply_form_fields_includes_predefined_options(self):
+        session = self._make_session()
+        session._apply_field_options = {
+            "custom__radio_q": ["Yes", "No"],
+            "custom__select_q": ["Backend", "Platform", "Data"],
+        }
+        scanned = [
+            ("custom__radio_q", "Do you agree?", "radio"),
+            ("custom__select_q", "Choose your stack", "select"),
+        ]
+
+        fields = session._build_apply_form_fields(scanned)
+        prompts_by_key = {key: prompt for key, prompt in fields}
+
+        self.assertIn("Options:", prompts_by_key["custom__radio_q"])
+        self.assertIn("1) Yes", prompts_by_key["custom__radio_q"])
+        self.assertIn("2) No", prompts_by_key["custom__radio_q"])
+        self.assertIn("Reply with option number or text.", prompts_by_key["custom__radio_q"])
+
+        self.assertIn("1) Backend", prompts_by_key["custom__select_q"])
+        self.assertIn("3) Data", prompts_by_key["custom__select_q"])
+
+    def test_build_apply_form_fields_marks_arabic_questions(self):
+        session = self._make_session()
+        scanned = [
+            ("custom__arabic_q", "هل أنت مستعد للانتقال؟", "radio"),
+        ]
+
+        fields = session._build_apply_form_fields(scanned)
+        prompts_by_key = {key: prompt for key, prompt in fields}
+        self.assertIn("Arabic question detected", prompts_by_key["custom__arabic_q"])
+
+    def test_validate_apply_answer_accepts_option_number(self):
+        session = self._make_session()
+        session._apply_field_types = {"custom__radio_q": "radio"}
+        session._apply_field_options = {"custom__radio_q": ["Yes", "No"]}
+
+        is_valid, _, normalized = session._validate_apply_answer("custom__radio_q", "2")
+        self.assertTrue(is_valid)
+        self.assertEqual(normalized, "No")
+
 
 class _FakeLeaf:
     def __init__(self, visible: bool = True):

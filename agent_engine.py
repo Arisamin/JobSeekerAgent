@@ -1794,6 +1794,8 @@ class TelegramJobSession:
         self._apply_asked_field_keys: List[str] = []
         self._apply_question_idx: int = 0
         self._apply_form_fields: List[Tuple[str, str]] = []  # built dynamically per job
+        self._apply_field_options: Dict[str, List[str]] = {}
+        self._apply_field_types: Dict[str, str] = {}
         self._return_state_after_apply: str = self.STATE_INTRO
         self._profile_path: Path = self.db.db_path.parent / self.PROFILE_FILENAME
         self._saved_profile: Dict[str, str] = self._load_saved_profile()
@@ -1805,22 +1807,75 @@ class TelegramJobSession:
     # ------------------------------------------------------------------
 
     def _send(self, text: str, parse_mode: str = "HTML") -> None:
-        """Send a message via the Bot API (blocking HTTP)."""
+        """Send a message via the Bot API (blocking HTTP) with safe fallback."""
         import urllib.request
-        import urllib.parse
-        payload = json.dumps({
-            "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-            "disable_web_page_preview": True,
-        }).encode("utf-8")
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        try:
+        import urllib.error
+
+        def _to_plain(v: str) -> str:
+            plain = html.unescape(v or "")
+            plain = re.sub(r"<br\s*/?>", "\n", plain, flags=re.IGNORECASE)
+            plain = re.sub(r"</p\s*>", "\n", plain, flags=re.IGNORECASE)
+            plain = re.sub(r"<[^>]+>", "", plain)
+            return plain
+
+        def _chunk_text(v: str, limit: int = 3500) -> List[str]:
+            content = (v or "").strip()
+            if not content:
+                return [""]
+            chunks: List[str] = []
+            remaining = content
+            while len(remaining) > limit:
+                cut = remaining.rfind("\n", 0, limit)
+                if cut < 200:
+                    cut = remaining.rfind(" ", 0, limit)
+                if cut < 200:
+                    cut = limit
+                chunks.append(remaining[:cut].strip())
+                remaining = remaining[cut:].strip()
+            if remaining:
+                chunks.append(remaining)
+            return chunks or [""]
+
+        def _send_once(message_text: str, mode: Optional[str]) -> Optional[str]:
+            payload_obj: Dict[str, Any] = {
+                "chat_id": self.chat_id,
+                "text": message_text,
+                "disable_web_page_preview": True,
+            }
+            if mode:
+                payload_obj["parse_mode"] = mode
+            payload = json.dumps(payload_obj).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=15) as resp:
-                pass
-        except Exception as exc:
-            self.logger.warning(f"Telegram send failed: {exc}")
+                try:
+                    return resp.read().decode("utf-8", errors="replace")
+                except Exception:
+                    return None
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+
+        for chunk in _chunk_text(text):
+            try:
+                _send_once(chunk, parse_mode)
+                continue
+            except urllib.error.HTTPError as exc:
+                body = ""
+                try:
+                    body = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body = ""
+                self.logger.warning(
+                    f"Telegram send failed: HTTP {getattr(exc, 'code', '?')} {exc}; body={body[:800]}"
+                )
+
+                try:
+                    _send_once(_to_plain(chunk), None)
+                    self.logger.info("Telegram send fallback succeeded with plain text mode")
+                    continue
+                except Exception as plain_exc:
+                    self.logger.warning(f"Telegram plain-text fallback failed: {plain_exc}")
+            except Exception as exc:
+                self.logger.warning(f"Telegram send failed: {exc}")
 
     def _send_document(self, filename: str, content: bytes, caption: str = "") -> None:
         """Send a file via the Bot API using multipart/form-data."""
@@ -2042,7 +2097,11 @@ class TelegramJobSession:
     # Dynamic form-field discovery
     # ------------------------------------------------------------------
 
-    def _scan_easy_apply_fields(self, job_url: str) -> List[Tuple[str, str, str]]:
+    def _scan_easy_apply_fields(
+        self,
+        job_url: str,
+        seed_answers: Optional[Dict[str, str]] = None,
+    ) -> List[Tuple[str, str, str]]:
         """
         Open the Easy Apply modal for *job_url* (without submitting), walk every
         wizard step, and return a list of discovered fields:
@@ -2068,9 +2127,11 @@ class TelegramJobSession:
         primary_profile = _os.path.join(local_app_data, "Google", "Chrome", "User Data") if local_app_data else ""
         fallback_profile = str(Path(__file__).parent / ".playwright_profile")
 
-        testing_mode = self._easy_apply_run_mode == "testing"
+        testing_mode = self._easy_apply_run_mode in {"testing", "normal"}
         easy_apply_headless = self._easy_apply_run_mode == "normal"
+        seed_answers_map = {k: (v or "") for k, v in (seed_answers or {}).items()}
         discovered: List[Tuple[str, str, str]] = []
+        discovered_options: Dict[str, List[str]] = {}
         seen_keys: set = set()
 
         def _random_digits(length: int) -> str:
@@ -2162,7 +2223,43 @@ class TelegramJobSession:
             """Sanitise label text into a safe dict key."""
             return re.sub(r"[^a-z0-9_]", "_", text.lower().strip())[:60]
 
-        def _add(key: str, label: str, ftype: str) -> None:
+        def _answer_for_label(label: str) -> str:
+            normalized = normalize_form_label(label or "")
+            if not normalized:
+                return ""
+            profile_key = _profile_key_for(normalized)
+            if profile_key:
+                seeded = (seed_answers_map.get(profile_key) or "").strip()
+                if seeded:
+                    return seeded
+                saved = (self._saved_profile.get(profile_key) or "").strip()
+                if saved:
+                    return saved
+            custom_key = f"custom__{_slug(normalized)}"
+            seeded_custom = (seed_answers_map.get(custom_key) or "").strip()
+            if seeded_custom:
+                return seeded_custom
+            return ""
+
+        def _merge_options(key: str, options: List[str]) -> None:
+            if not options:
+                return
+            bucket = discovered_options.setdefault(key, [])
+            for option in options:
+                normalized = normalize_form_label(option or "")
+                if not normalized:
+                    continue
+                lowered = normalized.lower()
+                if lowered in {"select", "choose", "اختر", "--", "n/a", "na"}:
+                    continue
+                if any(existing.lower() == lowered for existing in bucket):
+                    continue
+                bucket.append(normalized)
+                if len(bucket) >= 8:
+                    break
+
+        def _add(key: str, label: str, ftype: str, options: Optional[List[str]] = None) -> None:
+            _merge_options(key, options or [])
             if key in seen_keys:
                 return
             seen_keys.add(key)
@@ -2249,7 +2346,15 @@ class TelegramJobSession:
                         continue
                     pk = _profile_key_for(label)
                     key = pk if pk else f"custom__{_slug(label)}"
-                    _add(key, label, "select")
+                    options: List[str] = []
+                    try:
+                        for opt in sel_el.locator("option").all():
+                            txt = normalize_form_label(opt.inner_text(timeout=200))
+                            if txt:
+                                options.append(txt)
+                    except Exception:
+                        pass
+                    _add(key, label, "select", options=options)
                 except Exception:
                     pass
 
@@ -2293,7 +2398,15 @@ class TelegramJobSession:
                         pass
                     pk = _profile_key_for(legend)
                     key = pk if pk else f"custom__{_slug(legend)}"
-                    _add(key, legend, ftype)
+                    option_labels: List[str] = []
+                    try:
+                        for lbl in fieldset.locator("label").all():
+                            txt = normalize_form_label(lbl.inner_text(timeout=200))
+                            if txt and txt.lower() != legend.lower():
+                                option_labels.append(txt)
+                    except Exception:
+                        pass
+                    _add(key, legend, ftype, options=option_labels)
                 except Exception:
                     pass
 
@@ -2329,7 +2442,20 @@ class TelegramJobSession:
 
                     pk = _profile_key_for(label)
                     key = pk if pk else f"custom__{_slug(label)}"
-                    _add(key, label, "radio")
+                    option_labels: List[str] = []
+                    try:
+                        for idx in range(min(group.count(), 8)):
+                            radio_i = group.nth(idx)
+                            rid = (radio_i.get_attribute("id", timeout=200) or "").strip()
+                            if rid:
+                                lbl = page.locator(f"label[for='{rid}']").first
+                                if lbl.count() > 0:
+                                    txt = normalize_form_label(lbl.inner_text(timeout=200))
+                                    if txt:
+                                        option_labels.append(txt)
+                    except Exception:
+                        pass
+                    _add(key, label, "radio", options=option_labels)
                 except Exception:
                     continue
 
@@ -2347,7 +2473,15 @@ class TelegramJobSession:
                         continue
                     pk = _profile_key_for(label)
                     key = pk if pk else f"custom__{_slug(label)}"
-                    _add(key, label, "radio")
+                    option_labels: List[str] = []
+                    try:
+                        lines = [normalize_form_label(line) for line in rg.inner_text(timeout=300).splitlines()]
+                        lines = [line for line in lines if line]
+                        if len(lines) > 1:
+                            option_labels = lines[1:]
+                    except Exception:
+                        pass
+                    _add(key, label, "radio", options=option_labels)
                 except Exception:
                     continue
 
@@ -2364,6 +2498,76 @@ class TelegramJobSession:
                     _add(key, label, "checkbox")
                 except Exception:
                     continue
+
+        def _current_page_signature(page: Any, scope: Optional[Any] = None) -> str:
+            root = scope if scope is not None else page
+            labels: List[str] = []
+
+            def _push(label: str) -> None:
+                normalized = normalize_form_label(label or "")
+                if normalized:
+                    labels.append(normalized.lower())
+
+            try:
+                controls = root.locator(
+                    "input, textarea, select, [role='textbox'], [role='combobox']"
+                )
+                for idx in range(min(controls.count(), 40)):
+                    try:
+                        control = controls.nth(idx)
+                        if not control.is_visible(timeout=150):
+                            continue
+                        _push(_label_for(page, control))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            try:
+                fieldsets = root.locator("fieldset")
+                for idx in range(min(fieldsets.count(), 12)):
+                    try:
+                        fieldset = fieldsets.nth(idx)
+                        if not fieldset.is_visible(timeout=150):
+                            continue
+                        legend = ""
+                        try:
+                            legend = normalize_form_label(fieldset.locator("legend").first.inner_text(timeout=200))
+                        except Exception:
+                            legend = ""
+                        if not legend:
+                            try:
+                                legend = extract_question_label_from_block_text(fieldset.inner_text(timeout=200))
+                            except Exception:
+                                legend = ""
+                        _push(legend)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            try:
+                radio_groups = root.locator("[role='radiogroup']")
+                for idx in range(min(radio_groups.count(), 12)):
+                    try:
+                        radio_group = radio_groups.nth(idx)
+                        if not radio_group.is_visible(timeout=150):
+                            continue
+                        _push(extract_question_label_from_block_text(radio_group.inner_text(timeout=200)))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            deduped_labels = list(dict.fromkeys(label for label in labels if label))
+            if deduped_labels:
+                return " | ".join(deduped_labels)[:500]
+
+            try:
+                fallback_text = (root.inner_text(timeout=300) or "").strip().lower()
+                return re.sub(r"\s+", " ", fallback_text)[:500]
+            except Exception:
+                return ""
 
         def _prefill_required_for_scan(page: Any, scope: Optional[Any] = None) -> None:
             """
@@ -2392,32 +2596,34 @@ class TelegramJobSession:
                     if testing_mode:
                         fill = _random_testing_value(label, ftype)
                     else:
-                        fill = "test"
-                        if "email" in label:
-                            fill = "test@example.com"
-                        elif "phone" in label or "mobile" in label:
-                            fill = "0500000000"
-                        elif "linkedin" in label:
-                            fill = self._saved_profile.get("linkedin") or "https://www.linkedin.com/in/test"
-                        elif "github" in label:
-                            fill = self._saved_profile.get("github") or "No"
-                        elif "website" in label or "blog" in label:
-                            fill = self._saved_profile.get("website") or "No"
-                        elif "year" in label and "experience" in label:
-                            fill = self._saved_profile.get("experience_years") or "5"
-                        elif "salary" in label or "compensation" in label:
-                            fill = self._saved_profile.get("salary_expectation") or "30000"
-                        elif "notice" in label or "availability" in label:
-                            fill = self._saved_profile.get("notice_period") or "1 month"
-                        elif "first" in label and "name" in label:
-                            fill = (self._saved_profile.get("full_name") or "Test User").split()[0]
-                        elif "last" in label and "name" in label:
-                            full = (self._saved_profile.get("full_name") or "Test User").split()
-                            fill = full[-1] if len(full) > 1 else full[0]
-                        elif "name" in label:
-                            fill = self._saved_profile.get("full_name") or "Test User"
-                        elif "location" in label or "city" in label:
-                            fill = self._saved_profile.get("location") or "Tel Aviv"
+                        fill = (_answer_for_label(label) or "").strip()
+                        if not fill:
+                            fill = "test"
+                            if "email" in label:
+                                fill = "test@example.com"
+                            elif "phone" in label or "mobile" in label:
+                                fill = "0500000000"
+                            elif "linkedin" in label:
+                                fill = self._saved_profile.get("linkedin") or "https://www.linkedin.com/in/test"
+                            elif "github" in label:
+                                fill = self._saved_profile.get("github") or "No"
+                            elif "website" in label or "blog" in label:
+                                fill = self._saved_profile.get("website") or "No"
+                            elif "year" in label and "experience" in label:
+                                fill = self._saved_profile.get("experience_years") or "5"
+                            elif "salary" in label or "compensation" in label:
+                                fill = self._saved_profile.get("salary_expectation") or "30000"
+                            elif "notice" in label or "availability" in label:
+                                fill = self._saved_profile.get("notice_period") or "1 month"
+                            elif "first" in label and "name" in label:
+                                fill = (self._saved_profile.get("full_name") or "Test User").split()[0]
+                            elif "last" in label and "name" in label:
+                                full = (self._saved_profile.get("full_name") or "Test User").split()
+                                fill = full[-1] if len(full) > 1 else full[0]
+                            elif "name" in label:
+                                fill = self._saved_profile.get("full_name") or "Test User"
+                            elif "location" in label or "city" in label:
+                                fill = self._saved_profile.get("location") or "Tel Aviv"
                     inp.fill(fill, timeout=1000)
                 except Exception:
                     continue
@@ -2431,7 +2637,10 @@ class TelegramJobSession:
                     if current_text:
                         continue
                     label = _label_for(page, tb)
-                    fill = _random_testing_value(label, "text") if testing_mode else "test"
+                    if testing_mode:
+                        fill = _random_testing_value(label, "text")
+                    else:
+                        fill = _answer_for_label(label) or "test"
                     tb.click(timeout=800)
                     page.keyboard.type(fill, delay=15)
                 except Exception:
@@ -2444,6 +2653,7 @@ class TelegramJobSession:
                         continue
                     options = sel_el.locator("option").all()
                     candidates: List[str] = []
+                    desired_answer = (_answer_for_label(_label_for(page, sel_el)) or "").strip().lower()
                     for opt in options:
                         try:
                             value = (opt.get_attribute("value", timeout=300) or "").strip()
@@ -2456,7 +2666,20 @@ class TelegramJobSession:
                         except Exception:
                             continue
                     picked = False
-                    if candidates:
+                    if desired_answer:
+                        for opt in options:
+                            try:
+                                value = (opt.get_attribute("value", timeout=300) or "").strip()
+                                text = (opt.inner_text(timeout=300) or "").strip().lower()
+                                if not value:
+                                    continue
+                                if desired_answer in text or desired_answer == value.lower():
+                                    sel_el.select_option(value=value)
+                                    picked = True
+                                    break
+                            except Exception:
+                                continue
+                    if not picked and candidates:
                         try:
                             value_to_pick = random.choice(candidates) if testing_mode else candidates[0]
                             sel_el.select_option(value=value_to_pick)
@@ -2781,6 +3004,8 @@ class TelegramJobSession:
 
                     # Walk wizard steps (scan only – never submit)
                     max_steps = 20
+                    last_page_signature = ""
+                    stagnant_signature_streak = 0
                     for _step in range(max_steps):
                         page.wait_for_timeout(800)
                         before = len(discovered)
@@ -2788,6 +3013,21 @@ class TelegramJobSession:
                         _prefill_required_for_scan(page, scope=modal_scope)
                         new_fields = len(discovered) - before
                         self.logger.info(f"Scan step {_step}: +{new_fields} new field(s), total={len(discovered)}")
+
+                        page_signature = _current_page_signature(page, scope=modal_scope)
+
+                        if page_signature and page_signature == last_page_signature:
+                            stagnant_signature_streak += 1
+                        else:
+                            stagnant_signature_streak = 0
+                        if page_signature:
+                            last_page_signature = page_signature
+
+                        if new_fields == 0 and stagnant_signature_streak >= 1:
+                            self.logger.info(
+                                f"Scan step {_step}: visible form content unchanged after advance; stopping wizard walk"
+                            )
+                            break
 
                         # Find advance button (language-agnostic) — scoped to modal
                         advance = None
@@ -2947,6 +3187,7 @@ class TelegramJobSession:
         except Exception as exc:
             self.logger.warning(f"Easy Apply scan failed: {exc}")
 
+        self._apply_field_options = discovered_options
         self.logger.info(f"Easy Apply scan: found {len(discovered)} field(s): {[k for k,_,_ in discovered]}")
         return discovered
 
@@ -2966,20 +3207,39 @@ class TelegramJobSession:
         - Unknown custom__ fields get a verbatim question prompt.
         """
         result: List[Tuple[str, str]] = list(self.FIXED_FIELDS)
+        self._apply_field_types = {
+            "cv_path": "file",
+            "cover_letter_path": "file",
+            "full_name": "text",
+            "email": "email",
+            "phone": "tel",
+            "location": "text",
+            "linkedin": "url",
+        }
         fixed_keys = {k for k, _ in self.FIXED_FIELDS}
+
+        def _contains_arabic(text: str) -> bool:
+            return bool(re.search(r"[\u0600-\u06FF]", text or ""))
 
         for key, label, ftype in scanned:
             if key in fixed_keys:
                 continue  # already covered
+            self._apply_field_types[key] = ftype
             # Build a prompt from the label and field type
+            options = self._apply_field_options.get(key, [])
+            options_block = ""
+            if options and ftype in {"radio", "checkbox", "select"}:
+                options_lines = [f"   {index + 1}) {html.escape(opt)}" for index, opt in enumerate(options[:8])]
+                options_block = "\nOptions:\n" + "\n".join(options_lines) + "\nReply with option number or text."
+            arabic_note = "\n🌐 Arabic question detected; answering in English is okay." if _contains_arabic(label) else ""
             if ftype in {"radio", "checkbox"}:
-                prompt = f"❓ {label} (type your answer):"
+                prompt = f"❓ {label} (type your answer):{options_block}{arabic_note}"
             elif ftype == "select":
-                prompt = f"🔽 {label} (type your choice):"
+                prompt = f"🔽 {label} (type your choice):{options_block}{arabic_note}"
             elif ftype == "file":
                 continue  # file inputs are handled by FIXED_FIELDS
             else:
-                prompt = f"✏️ {label}:"
+                prompt = f"✏️ {label}:{arabic_note}"
             result.append((key, prompt))
             fixed_keys.add(key)
 
@@ -3004,6 +3264,24 @@ class TelegramJobSession:
         answer = raw_answer.strip().strip('"').strip("'")
         if not answer:
             return False, "⚠️ Empty answer. Please provide a value.", ""
+
+        ftype = self._apply_field_types.get(field_key, "")
+        options = self._apply_field_options.get(field_key, [])
+        if options and ftype in {"radio", "checkbox", "select"}:
+            if answer.isdigit():
+                idx = int(answer) - 1
+                if 0 <= idx < len(options):
+                    return True, "", options[idx]
+                return False, f"⚠️ Invalid option number. Choose 1-{len(options)}.", ""
+
+            lowered = answer.lower()
+            for option in options:
+                if lowered == option.lower():
+                    return True, "", option
+
+            return False, (
+                "⚠️ Please answer with one of the listed options (or its number)."
+            ), ""
 
         if field_key == "cv_path":
             candidate = Path(answer)
@@ -3399,6 +3677,9 @@ class TelegramJobSession:
             )
 
         if self._apply_question_idx >= len(self._apply_form_fields):
+            if self._maybe_expand_apply_fields_via_rescan(job_url):
+                self._send_current_apply_prompt()
+                return True
             return self._show_apply_summary()
 
         self._send_current_apply_prompt()
@@ -3476,7 +3757,58 @@ class TelegramJobSession:
             self._send_current_apply_prompt()
             return True
 
+        current_job_url = (self._current_job or {}).get("url", "")
+        if self._maybe_expand_apply_fields_via_rescan(current_job_url):
+            self._send_current_apply_prompt()
+            return True
+
         return self._show_apply_summary()
+
+    def _maybe_expand_apply_fields_via_rescan(self, job_url: str) -> bool:
+        """
+        In normal mode, re-scan the wizard using answers collected so far.
+        If new fields are discovered, append them and continue Q&A.
+        """
+        if self._easy_apply_run_mode != "normal":
+            return False
+        if not job_url:
+            return False
+
+        existing_keys = [field_key for field_key, _prompt in self._apply_form_fields]
+        existing_set = set(existing_keys)
+
+        try:
+            rescanned = self._scan_easy_apply_fields(job_url, seed_answers=dict(self._apply_answers))
+        except Exception as exc:
+            self.logger.warning(f"Iterative scan raised unexpectedly: {exc}")
+            return False
+
+        if not rescanned:
+            return False
+
+        merged_fields = self._build_apply_form_fields(rescanned)
+        merged_keys = [field_key for field_key, _prompt in merged_fields]
+        new_keys = [key for key in merged_keys if key not in existing_set]
+        if not new_keys:
+            return False
+
+        self._apply_form_fields = merged_fields
+        self._apply_question_idx = self._first_missing_apply_field_idx()
+
+        new_labels: List[str] = []
+        for field_key, label, _ftype in rescanned:
+            if field_key in new_keys:
+                new_labels.append(label)
+        if new_labels:
+            self._send(
+                "🔁 Thanks — your answers unlocked additional form page(s).\n"
+                "I found more required questions:\n"
+                + "\n".join(f"  • {html.escape(label)}" for label in new_labels)
+            )
+        else:
+            self._send("🔁 Thanks — your answers unlocked additional form page(s).")
+
+        return self._apply_question_idx < len(self._apply_form_fields)
 
     def _show_apply_summary(self) -> bool:
         """All Q&A answers collected. Show summary and ask user to Submit or Cancel."""
@@ -4065,8 +4397,31 @@ class TelegramJobSession:
             self.logger.info(f"Telegram poll bootstrap: skipped {len(bootstrap_updates)} stale update(s)")
         self.logger.info("Telegram session started, entering poll loop")
 
+        interrupt_count = 0
+        interrupt_window_started = 0.0
         while True:
-            updates = self._get_updates(offset=offset, timeout=20)
+            try:
+                updates = self._get_updates(offset=offset, timeout=20)
+                interrupt_count = 0
+                interrupt_window_started = 0.0
+            except KeyboardInterrupt:
+                now_ts = time.time()
+                if interrupt_window_started and (now_ts - interrupt_window_started) <= 3.0:
+                    interrupt_count += 1
+                else:
+                    interrupt_window_started = now_ts
+                    interrupt_count = 1
+
+                if interrupt_count >= 2:
+                    self.logger.info("Telegram session interrupted twice; shutting down")
+                    return
+
+                self.logger.warning(
+                    "Telegram poll interrupted once; continuing (press Ctrl+C again within 3s to stop)"
+                )
+                time.sleep(1)
+                continue
+
             for update in updates:
                 offset = update["update_id"] + 1
                 message = update.get("message", {})
