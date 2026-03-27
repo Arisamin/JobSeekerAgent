@@ -1967,6 +1967,8 @@ class TelegramJobSession:
             with urllib.request.urlopen(url, timeout=timeout + 5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("result", [])
+        except KeyboardInterrupt:
+            raise
         except Exception as exc:
             self.logger.warning(f"Telegram getUpdates failed: {exc}")
             return []
