@@ -2259,6 +2259,9 @@ class TelegramJobSession:
                     break
 
         def _add(key: str, label: str, ftype: str, options: Optional[List[str]] = None) -> None:
+            # Replace Arabic labels with descriptive text
+            if _contains_arabic(label):
+                label = f"[Multilingual question - {ftype}]"
             _merge_options(key, options or [])
             if key in seen_keys:
                 return
@@ -2348,10 +2351,24 @@ class TelegramJobSession:
                     key = pk if pk else f"custom__{_slug(label)}"
                     options: List[str] = []
                     try:
+                        # Capture initial options
                         for opt in sel_el.locator("option").all():
                             txt = normalize_form_label(opt.inner_text(timeout=200))
                             if txt:
                                 options.append(txt)
+                        # Scroll select element to ensure all options are rendered (for long lists)
+                        if len(options) > 10:
+                            try:
+                                sel_el.evaluate("el => el.scrollTop = el.scrollHeight", timeout=300)
+                                import time as _time
+                                _time.sleep(0.2)
+                                # Re-capture all options after scroll
+                                for opt in sel_el.locator("option").all():
+                                    txt = normalize_form_label(opt.inner_text(timeout=200))
+                                    if txt and txt not in options:
+                                        options.append(txt)
+                            except Exception:
+                                pass  # scrolling failed, but we have initial options
                     except Exception:
                         pass
                     _add(key, label, "select", options=options)
@@ -3221,7 +3238,7 @@ class TelegramJobSession:
         def _contains_arabic(text: str) -> bool:
             return bool(re.search(r"[\u0600-\u06FF]", text or ""))
 
-        for key, label, ftype in scanned:
+        for question_idx, (key, label, ftype) in enumerate(scanned, 1):
             if key in fixed_keys:
                 continue  # already covered
             self._apply_field_types[key] = ftype
@@ -3229,17 +3246,18 @@ class TelegramJobSession:
             options = self._apply_field_options.get(key, [])
             options_block = ""
             if options and ftype in {"radio", "checkbox", "select"}:
-                options_lines = [f"   {index + 1}) {html.escape(opt)}" for index, opt in enumerate(options[:8])]
+                options_lines = [f"   {index + 1}) {html.escape(opt)}" for index, opt in enumerate(options)]
                 options_block = "\nOptions:\n" + "\n".join(options_lines) + "\nReply with option number or text."
-            arabic_note = "\n🌐 Arabic question detected; answering in English is okay." if _contains_arabic(label) else ""
+            arabic_note = "\n🌐 Arabic label detected; English answer is fine." if _contains_arabic(label) else ""
+            condensed_label = self._condense_label_10_words(label)
             if ftype in {"radio", "checkbox"}:
-                prompt = f"❓ {label} (type your answer):{options_block}{arabic_note}"
+                prompt = f"❓ Q{question_idx}: {condensed_label} (type your answer):{options_block}{arabic_note}"
             elif ftype == "select":
-                prompt = f"🔽 {label} (type your choice):{options_block}{arabic_note}"
+                prompt = f"🔽 Q{question_idx}: {condensed_label} (type your choice):{options_block}{arabic_note}"
             elif ftype == "file":
                 continue  # file inputs are handled by FIXED_FIELDS
             else:
-                prompt = f"✏️ {label}:{arabic_note}"
+                prompt = f"✏️ Q{question_idx}: {condensed_label}:{arabic_note}"
             result.append((key, prompt))
             fixed_keys.add(key)
 
@@ -3810,6 +3828,13 @@ class TelegramJobSession:
 
         return self._apply_question_idx < len(self._apply_form_fields)
 
+    def _condense_label_10_words(self, label: str, max_len: int = 10) -> str:
+        """Truncate label to max_len words for compact display."""
+        words = label.split()
+        if len(words) <= max_len:
+            return label
+        return " ".join(words[:max_len])
+
     def _show_apply_summary(self) -> bool:
         """All Q&A answers collected. Show summary and ask user to Submit or Cancel."""
         job = self._current_job or {}
@@ -3818,7 +3843,7 @@ class TelegramJobSession:
         url = job.get("url", "")
 
         submission_lines: List[str] = []
-        for field_key, prompt in self._apply_form_fields:
+        for question_idx, (field_key, prompt) in enumerate(self._apply_form_fields, 1):
             value = (self._apply_answers.get(field_key) or "").strip()
             include_empty_for_asked = (field_key in self._apply_asked_field_keys)
             if not value and not include_empty_for_asked:
@@ -3827,8 +3852,9 @@ class TelegramJobSession:
             # Build a clean display label from the prompt
             label = prompt.split(" ", 1)[1].rstrip(":") if " " in prompt else prompt.rstrip(":")
             label = label.split(" (", 1)[0].strip()
+            label = self._condense_label_10_words(label)
             display_value = value or "(not provided)"
-            submission_lines.append(f"• <b>{html.escape(label)}</b>: {html.escape(display_value)}")
+            submission_lines.append(f"• Q{question_idx}: <b>{html.escape(label)}</b>: {html.escape(display_value)}")
 
         submission_section = "\n🧾 <b>Data that will be submitted in this application:</b>\n"
         if submission_lines:
