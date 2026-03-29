@@ -2,7 +2,7 @@
 Automated chat simulation started
 
 [JOB-SEEKER]
-👋 Job Agent Report — 2026-03-26 21:35
+👋 Job Agent Report — 2026-03-28 00:07
 
 🔍 Query: Senior C# Developer Israel
 
@@ -14,7 +14,235 @@ Reply db to browse all DB jobs | Done to finish
 db
 
 [JOB-SEEKER]
-[DB] Job 1/57  |  ID: 88
+[DB] Job 1/76  |  ID: 107
+Software Engineering Technical Lead
+🏢 Cisco
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4372704918/">https://www.linkedin.com/jobs/view/4372704918/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 2/76  |  ID: 106
+DevOps Engineer
+🏢 Tavily
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4390976623/">https://www.linkedin.com/jobs/view/4390976623/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 3/76  |  ID: 105
+Dotnet Developer
+🏢 Yael Korentec Technologies
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4389728946/">https://www.linkedin.com/jobs/view/4389728946/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 4/76  |  ID: 104
+Software Development Engineer, Prime Video Sports
+🏢 Prime Video & Amazon MGM Studios
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4371415999/">https://www.linkedin.com/jobs/view/4371415999/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 5/76  |  ID: 103
+Senior Backend Engineer (Data-Focused)
+🏢 Akamai Technologies
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4346707695/">https://www.linkedin.com/jobs/view/4346707695/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 6/76  |  ID: 102
+Senior C++ Win Engineer
+🏢 CyberArk
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4371526989/">https://www.linkedin.com/jobs/view/4371526989/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 7/76  |  ID: 101
+Senior Backend Software Engineer
+🏢 CyberArk
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4371540085/">https://www.linkedin.com/jobs/view/4371540085/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 8/76  |  ID: 100
+Sr. Software Engineer - Cloud, Falcon Cloud Security (Hybrid, ISR)
+🏢 CrowdStrike
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4363945385/">https://www.linkedin.com/jobs/view/4363945385/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 9/76  |  ID: 99
+Sr. Software Engineer - Cloud, Falcon Cloud Security (Hybrid, ISR)
+🏢 CrowdStrike
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4364420305/">https://www.linkedin.com/jobs/view/4364420305/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 10/76  |  ID: 98
+Chapter Lead Backend
+🏢 comblack
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4390876598/">https://www.linkedin.com/jobs/view/4390876598/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 11/76  |  ID: 97
+Client Developer
+🏢 FireArc Technologies .LTD
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4391078395/">https://www.linkedin.com/jobs/view/4391078395/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 12/76  |  ID: 96
+Staff Software Engineer - Linux/Kernel
+🏢 Datadog
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4365129139/">https://www.linkedin.com/jobs/view/4365129139/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 13/76  |  ID: 95
+Backend Technical Leader
+🏢 NetApp
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4391476480/">https://www.linkedin.com/jobs/view/4391476480/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 14/76  |  ID: 94
+Python Developer
+🏢 Dreamhub
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4391910517/">https://www.linkedin.com/jobs/view/4391910517/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 15/76  |  ID: 93
+Embedded Python + C++ Developer (Devices / Low-Level)
+🏢 Michal Recruiting & Placement
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4391070798/">https://www.linkedin.com/jobs/view/4391070798/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 16/76  |  ID: 92
+Sr Staff Software Engineer - Product Security
+🏢 ServiceNow
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4383329566/">https://www.linkedin.com/jobs/view/4383329566/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 17/76  |  ID: 91
+Sr. Data Engineer - Cloud Security
+🏢 CrowdStrike
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4391905483/">https://www.linkedin.com/jobs/view/4391905483/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 18/76  |  ID: 90
+Senior Backend Engineer
+🏢 Stealth Startup
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4390870853/">https://www.linkedin.com/jobs/view/4390870853/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 19/76  |  ID: 89
+Back End Developer
+🏢 Medulla
+📌 Status: Discovered
+🔗 <a href="https://www.linkedin.com/jobs/view/4391144637/">https://www.linkedin.com/jobs/view/4391144637/</a>
+
+Reply: Next | Apply | Skip | Done
+
+[TESTER]
+next
+
+[JOB-SEEKER]
+[DB] Job 20/76  |  ID: 88
 Principal Software Engineer, Elasticache
 🏢 Amazon Web Services (AWS)
 📌 Status: Discovered
@@ -26,7 +254,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 2/57  |  ID: 87
+[DB] Job 21/76  |  ID: 87
 Senior/Principal Backend Engineer -AI IDEX (Cortex Cloud)
 🏢 Palo Alto Networks
 📌 Status: Discovered
@@ -38,7 +266,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 3/57  |  ID: 86
+[DB] Job 22/76  |  ID: 86
 Software Engineer II and Senior Software Engineer- Microsoft Security (Multiple Roles)
 🏢 Microsoft
 📌 Status: Discovered
@@ -50,7 +278,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 4/57  |  ID: 85
+[DB] Job 23/76  |  ID: 85
 Staff Software Engineer - Product Security
 🏢 ServiceNow
 📌 Status: Discovered
@@ -62,7 +290,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 5/57  |  ID: 84
+[DB] Job 24/76  |  ID: 84
 Senior Backend Engineer
 🏢 LSports
 📌 Status: Discovered
@@ -74,7 +302,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 6/57  |  ID: 83
+[DB] Job 25/76  |  ID: 83
 Senior Software Engineer, Google Cloud Networking
 🏢 Google
 📌 Status: Discovered
@@ -86,7 +314,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 7/57  |  ID: 82
+[DB] Job 26/76  |  ID: 82
 Senior System Engineer
 🏢 Confidential
 📌 Status: Discovered
@@ -98,7 +326,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 8/57  |  ID: 81
+[DB] Job 27/76  |  ID: 81
 Principal Software Engineer - Sovereign Cloud
 🏢 Red Hat
 📌 Status: Discovered
@@ -110,7 +338,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 9/57  |  ID: 80
+[DB] Job 28/76  |  ID: 80
 Senior Backend AI Engineer - Navan Edge
 🏢 Navan
 📌 Status: Discovered
@@ -122,7 +350,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 10/57  |  ID: 79
+[DB] Job 29/76  |  ID: 79
 Software Engineer
 🏢 Meta
 📌 Status: Discovered
@@ -134,7 +362,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 11/57  |  ID: 78
+[DB] Job 30/76  |  ID: 78
 *Senior Backend Engineer - Collection Engineering
 🏢 SentinelOne
 📌 Status: Discovered
@@ -146,7 +374,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 12/57  |  ID: 77
+[DB] Job 31/76  |  ID: 77
 Senior Backend Engineer
 🏢 Lemonade
 📌 Status: Discovered
@@ -158,7 +386,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 13/57  |  ID: 76
+[DB] Job 32/76  |  ID: 76
 Senior Software Engineer Tech Lead, SONiC Network OS
 🏢 NVIDIA
 📌 Status: Discovered
@@ -170,7 +398,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 14/57  |  ID: 75
+[DB] Job 33/76  |  ID: 75
 Senior SW Engineer
 🏢 Applied Materials - Israel
 📌 Status: Discovered
@@ -182,7 +410,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 15/57  |  ID: 74
+[DB] Job 34/76  |  ID: 74
 Sr. Software Engineer - Cloud Application Analysis (Hybrid, ISR)
 🏢 CrowdStrike
 📌 Status: Discovered
@@ -194,7 +422,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 16/57  |  ID: 73
+[DB] Job 35/76  |  ID: 73
 Senior C++ Developer
 🏢 Mobileye
 📌 Status: Discovered
@@ -206,7 +434,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 17/57  |  ID: 72
+[DB] Job 36/76  |  ID: 72
 Software Engineer
 🏢 Tavily
 📌 Status: Discovered
@@ -218,7 +446,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 18/57  |  ID: 71
+[DB] Job 37/76  |  ID: 71
 Senior Full Stack Engineer | Java / Angular | AI Healthcare | Hybrid
 🏢 AiOmed
 📌 Status: Discovered
@@ -230,7 +458,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 19/57  |  ID: 70
+[DB] Job 38/76  |  ID: 70
 Software Engineer, Backend
 🏢 Semperis
 📌 Status: Discovered
@@ -242,7 +470,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 20/57  |  ID: 69
+[DB] Job 39/76  |  ID: 69
 Senior Backend Engineer, Vendor Risk Management - Israel
 🏢 Vanta
 📌 Status: Discovered
@@ -254,7 +482,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 21/57  |  ID: 68
+[DB] Job 40/76  |  ID: 68
 Research Engineer
 🏢 Final
 📌 Status: Discovered
@@ -266,7 +494,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 22/57  |  ID: 67
+[DB] Job 41/76  |  ID: 67
 Full Stack Engineer
 🏢 HR Home
 📌 Status: Discovered
@@ -278,7 +506,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 23/57  |  ID: 66
+[DB] Job 42/76  |  ID: 66
 Software Engineer - Full Stack Front End Oriented
 🏢 Salesforce
 📌 Status: Discovered
@@ -290,7 +518,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 24/57  |  ID: 65
+[DB] Job 43/76  |  ID: 65
 Backend AI Engineer - Navan Edge
 🏢 Navan
 📌 Status: Discovered
@@ -302,7 +530,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 25/57  |  ID: 64
+[DB] Job 44/76  |  ID: 64
 C / C++ Developer
 🏢 SQLink Group
 📌 Status: Discovered
@@ -314,7 +542,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 26/57  |  ID: 63
+[DB] Job 45/76  |  ID: 63
 Full Stack Team Lead
 🏢 Elbit Systems Israel
 📌 Status: Discovered
@@ -326,7 +554,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 27/57  |  ID: 62
+[DB] Job 46/76  |  ID: 62
 .NET Developer
 🏢 Gotfriends
 📌 Status: Discovered
@@ -338,7 +566,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 28/57  |  ID: 61
+[DB] Job 47/76  |  ID: 61
 Full Stack Engineer
 🏢 Appsforce
 📌 Status: Discovered
@@ -350,7 +578,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 29/57  |  ID: 60
+[DB] Job 48/76  |  ID: 60
 Dotnet Developer
 🏢 מרטנס | Mertens – מקבוצת מלם תים
 📌 Status: Discovered
@@ -362,7 +590,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 30/57  |  ID: 59
+[DB] Job 49/76  |  ID: 59
 Backend Team Lead
 🏢 Neema - Better Than a Bank
 📌 Status: Discovered
@@ -374,7 +602,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 31/57  |  ID: 58
+[DB] Job 50/76  |  ID: 58
 Senior Software Engineer
 🏢 Cellebrite
 📌 Status: Discovered
@@ -386,7 +614,7 @@ Reply: Next | Apply | Skip | Done
 next
 
 [JOB-SEEKER]
-[DB] Job 32/57  |  ID: 57
+[DB] Job 51/76  |  ID: 57
 Back End Staff Software Engineer (Bangkok based, Relocation provided)
 🏢 Agoda
 📌 Status: Skipped
@@ -402,122 +630,15 @@ apply
 This opens a browser briefly in testing mode. I'll ask only the questions the form actually needs.
 
 [JOB-SEEKER]
-✅ Form scanned. Found 17 job-specific question(s):
-  • Github Profile? (Please paste link or answer 'No')
-  • Website / blog / other
-  • What is the employee’s name?
-  • If yes, please indicate how you know the employee? If yes, please indicate how you know the employee?
-  • To avoid actual or perceived impairment of our parent company’s independent auditor – Deloitte and to comply with applicable regulations of Securities and Exchange Commission of the United States, we need to seek approvals from our parent company before starting the interview process. With this, please confirm if you are currently or formerly have been associated with Deloitte or any of its subsidiary entities at any time including but not limited to any time as a direct employee, director, contractor, major shareholder, intern etc.? To avoid actual or perceived impairment of our parent company’s independent auditor – Deloitte and to comply with applicable regulations of Securities and Exchange Commission of the United States, we need to seek approvals from our parent company before starting the interview process. With this, please confirm if you are currently or formerly have been associated with Deloitte or any of its subsidiary entities at any time including but not limited to any time as a direct employee, director, contractor, major shareholder, intern etc.?
-  • How did you hear about this job? How did you hear about this job?
-  • In which country/region are you currently based? In which country/region are you currently based?
-  • What is your overall years of relevant experience? What is your overall years of relevant experience?
-  • Are you currently based in Bangkok or open to relocate to Bangkok? Are you currently based in Bangkok or open to relocate to Bangkok? مطلوب
-  • Do you as a candidate have a personal relationship with a current Agoda employee? Do you as a candidate have a personal relationship with a current Agoda employee? مطلوب
-  • Do you agree to Agoda’s use of personal data from your application to improve our recruitment experience? We may collaborate and share your data with third-party providers for recruitment purposes and you may ask to remove your data at any time. Do you agree to Agoda’s use of personal data from your application to improve our recruitment experience? We may collaborate and share your data with third-party providers for recruitment purposes and you may ask to remove your data at any time. مطلوب
-  • Are you presently employed by any company within the Booking Holdings group, including but not limited to Kayak, OpenTable, Booking.com, Rental Cars, RocketMiles, FareHarbor, HotelsCombined, CheapFlights, Momondo, Priceline, or Getaroom? Are you presently employed by any company within the Booking Holdings group, including but not limited to Kayak, OpenTable, Booking.com, Rental Cars, RocketMiles, FareHarbor, HotelsCombined, CheapFlights, Momondo, Priceline, or Getaroom? مطلوب
-  • Have you read our Engineering blog? (https://medium.com/agoda-engineering) Have you read our Engineering blog? (https://medium.com/agoda-engineering) مطلوب
-  • Have you applied to Agoda in the past 6 months Have you applied to Agoda in the past 6 months مطلوب
-  • Do you allow us to provide you TEXT/SMS updates of your interview process? We may engage with a service provider to do so. Do you allow us to provide you TEXT/SMS updates of your interview process? We may engage with a service provider to do so. مطلوب
-  • Have you applied to Agoda in the past 6 months
-  • قم بمتابعة شركة ⁦⁩‏Agoda‏⁦⁩ للبقاء على إطلاع بأحدث مستجدات الصفحة.
+✅ Form scanned. No extra questions beyond the standard fields.
 
 [JOB-SEEKER]
 🧾 Starting application form for Back End Staff Software Engineer (Bangkok based, Relocation provided) @ Agoda.
 Reply with each answer. Use Cancel or Quit anytime to abort.
 
 [JOB-SEEKER]
-💾 Loaded 9 saved profile field(s), so I'll ask only missing details.
+💾 Loaded 7 saved profile field(s), so I'll ask only missing details.
 Reply reset profile anytime (outside apply flow) to clear saved values.
-
-[JOB-SEEKER]
-📝 Cover letter file path (full path, or reply 'none' if not available):
-
-[TESTER]
-none
-
-[JOB-SEEKER]
-✏️ What is the employee’s name?:
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-🔽 If yes, please indicate how you know the employee? If yes, please indicate how you know the employee? (type your choice):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-🔽 To avoid actual or perceived impairment of our parent company’s independent auditor – Deloitte and to comply with applicable regulations of Securities and Exchange Commission of the United States, we need to seek approvals from our parent company before starting the interview process. With this, please confirm if you are currently or formerly have been associated with Deloitte or any of its subsidiary entities at any time including but not limited to any time as a direct employee, director, contractor, major shareholder, intern etc.? To avoid actual or perceived impairment of our parent company’s independent auditor – Deloitte and to comply with applicable regulations of Securities and Exchange Commission of the United States, we need to seek approvals from our parent company before starting the interview process. With this, please confirm if you are currently or formerly have been associated with Deloitte or any of its subsidiary entities at any time including but not limited to any time as a direct employee, director, contractor, major shareholder, intern etc.? (type your choice):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-🔽 How did you hear about this job? How did you hear about this job? (type your choice):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-🔽 In which country/region are you currently based? In which country/region are you currently based? (type your choice):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ Are you currently based in Bangkok or open to relocate to Bangkok? Are you currently based in Bangkok or open to relocate to Bangkok? مطلوب (type your answer):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ Do you as a candidate have a personal relationship with a current Agoda employee? Do you as a candidate have a personal relationship with a current Agoda employee? مطلوب (type your answer):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ Do you agree to Agoda’s use of personal data from your application to improve our recruitment experience? We may collaborate and share your data with third-party providers for recruitment purposes and you may ask to remove your data at any time. Do you agree to Agoda’s use of personal data from your application to improve our recruitment experience? We may collaborate and share your data with third-party providers for recruitment purposes and you may ask to remove your data at any time. مطلوب (type your answer):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ Are you presently employed by any company within the Booking Holdings group, including but not limited to Kayak, OpenTable, Booking.com, Rental Cars, RocketMiles, FareHarbor, HotelsCombined, CheapFlights, Momondo, Priceline, or Getaroom? Are you presently employed by any company within the Booking Holdings group, including but not limited to Kayak, OpenTable, Booking.com, Rental Cars, RocketMiles, FareHarbor, HotelsCombined, CheapFlights, Momondo, Priceline, or Getaroom? مطلوب (type your answer):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ Have you read our Engineering blog? (https://medium.com/agoda-engineering) Have you read our Engineering blog? (https://medium.com/agoda-engineering) مطلوب (type your answer):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ Have you applied to Agoda in the past 6 months Have you applied to Agoda in the past 6 months مطلوب (type your answer):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ Do you allow us to provide you TEXT/SMS updates of your interview process? We may engage with a service provider to do so. Do you allow us to provide you TEXT/SMS updates of your interview process? We may engage with a service provider to do so. مطلوب (type your answer):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ Have you applied to Agoda in the past 6 months (type your answer):
-
-[TESTER]
-No
-
-[JOB-SEEKER]
-❓ قم بمتابعة شركة ⁦⁩‏Agoda‏⁦⁩ للبقاء على إطلاع بأحدث مستجدات الصفحة. (type your answer):
-
-[TESTER]
-No
 
 [JOB-SEEKER]
 📋 Application Summary
@@ -526,29 +647,12 @@ Role: Back End Staff Software Engineer (Bangkok based, Relocation provided) @ Ag
 
 
 🧾 Data that will be submitted in this application:
-• CV file path: C:\MyData\Ariel CV - 2026 [2].pdf
-• Cover letter file path: (not provided)
-• Full name: Aba Guba
-• Email: avram@gmail.com
-• Phone number: 0556745678
-• Current location: jebalya
-• LinkedIn profile URL: https://www.linkedin.com/in/ariel-samin-58a57b22/
-• Github Profile?: https://github.com/Arisamin
-• Website / blog / other: https://example.com
-• What is the employee’s name?: No
-• If yes, please indicate how you know the employee? If yes, please indicate how you know the employee?: No
-• To avoid actual or perceived impairment of our parent company’s independent auditor – Deloitte and to comply with applicable regulations of Securities and Exchange Commission of the United States, we need to seek approvals from our parent company before starting the interview process. With this, please confirm if you are currently or formerly have been associated with Deloitte or any of its subsidiary entities at any time including but not limited to any time as a direct employee, director, contractor, major shareholder, intern etc.? To avoid actual or perceived impairment of our parent company’s independent auditor – Deloitte and to comply with applicable regulations of Securities and Exchange Commission of the United States, we need to seek approvals from our parent company before starting the interview process. With this, please confirm if you are currently or formerly have been associated with Deloitte or any of its subsidiary entities at any time including but not limited to any time as a direct employee, director, contractor, major shareholder, intern etc.?: No
-• How did you hear about this job? How did you hear about this job?: No
-• In which country/region are you currently based? In which country/region are you currently based?: No
-• What is your overall years of relevant experience? What is your overall years of relevant experience?: 60
-• Are you currently based in Bangkok or open to relocate to Bangkok? Are you currently based in Bangkok or open to relocate to Bangkok? مطلوب: No
-• Do you as a candidate have a personal relationship with a current Agoda employee? Do you as a candidate have a personal relationship with a current Agoda employee? مطلوب: No
-• Do you agree to Agoda’s use of personal data from your application to improve our recruitment experience? We may collaborate and share your data with third-party providers for recruitment purposes and you may ask to remove your data at any time. Do you agree to Agoda’s use of personal data from your application to improve our recruitment experience? We may collaborate and share your data with third-party providers for recruitment purposes and you may ask to remove your data at any time. مطلوب: No
-• Are you presently employed by any company within the Booking Holdings group, including but not limited to Kayak, OpenTable, Booking.com, Rental Cars, RocketMiles, FareHarbor, HotelsCombined, CheapFlights, Momondo, Priceline, or Getaroom? Are you presently employed by any company within the Booking Holdings group, including but not limited to Kayak, OpenTable, Booking.com, Rental Cars, RocketMiles, FareHarbor, HotelsCombined, CheapFlights, Momondo, Priceline, or Getaroom? مطلوب: No
-• Have you read our Engineering blog?: No
-• Have you applied to Agoda in the past 6 months Have you applied to Agoda in the past 6 months مطلوب: No
-• Do you allow us to provide you TEXT/SMS updates of your interview process? We may engage with a service provider to do so. Do you allow us to provide you TEXT/SMS updates of your interview process? We may engage with a service provider to do so. مطلوب: No
-• Have you applied to Agoda in the past 6 months: No
-• قم بمتابعة شركة ⁦⁩‏Agoda‏⁦⁩ للبقاء على إطلاع بأحدث مستجدات الصفحة.: No
+• Q1: CV file path: C:\MyData\Ariel CV - 2026 [2].pdf
+• Q2: Cover letter file path: C:\MyData\Ariel CV - 2026 [2].pdf
+• Q3: Full name: Aba Guba
+• Q4: Email: avram@gmail.com
+• Q5: Phone number: 0556745678
+• Q6: Current location: jebalya
+• Q7: LinkedIn profile URL: https://www.linkedin.com/in/ariel-samin-58a57b22/
 
 Reply Preview to fill and stop on the final review page (no submit), or Submit to fill & submit the form on LinkedIn, or Cancel to abort.

@@ -98,7 +98,10 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         fields = session._build_apply_form_fields(scanned)
         prompts_by_key = {key: prompt for key, prompt in fields}
 
-        self.assertEqual(prompts_by_key["custom__radio_q"], "❓ Do you agree? (type your answer):")
+        self.assertIn("❓ Do you agree? (type your answer):", prompts_by_key["custom__radio_q"])
+        self.assertIn("Options:", prompts_by_key["custom__radio_q"])
+        self.assertIn("1) Yes", prompts_by_key["custom__radio_q"])
+        self.assertIn("2) No", prompts_by_key["custom__radio_q"])
         self.assertEqual(prompts_by_key["custom__select_q"], "🔽 Choose your stack (type your choice):")
         self.assertEqual(prompts_by_key["custom__text_q"], "✏️ Tell us about yourself:")
         self.assertEqual(prompts_by_key["custom__checkbox_q"], "❓ Accept terms (type your answer):")
@@ -133,7 +136,8 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
 
         fields = session._build_apply_form_fields(scanned)
         prompts_by_key = {key: prompt for key, prompt in fields}
-        self.assertIn("Arabic question detected", prompts_by_key["custom__arabic_q"])
+        self.assertIn("هل أنت مستعد للانتقال؟", prompts_by_key["custom__arabic_q"])
+        self.assertIn("Arabic label detected", prompts_by_key["custom__arabic_q"])
 
     def test_validate_apply_answer_accepts_option_number(self):
         session = self._make_session()
@@ -143,6 +147,30 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         is_valid, _, normalized = session._validate_apply_answer("custom__radio_q", "2")
         self.assertTrue(is_valid)
         self.assertEqual(normalized, "No")
+
+    def test_build_apply_form_fields_truncates_displayed_options_for_large_select(self):
+        session = self._make_session()
+        many_options = [f"Country {i}" for i in range(1, 60)]
+        session._apply_field_options = {"custom__country": many_options}
+        fields = session._build_apply_form_fields([
+            ("custom__country", "In which country are you currently based?", "select"),
+        ])
+        prompts_by_key = {key: prompt for key, prompt in fields}
+        prompt = prompts_by_key["custom__country"]
+
+        self.assertIn("1) Country 1", prompt)
+        self.assertIn("25) Country 25", prompt)
+        self.assertNotIn("26) Country 26", prompt)
+        self.assertIn("more option(s) not shown", prompt)
+
+    def test_validate_apply_answer_allows_free_text_for_select(self):
+        session = self._make_session()
+        session._apply_field_types = {"custom__country": "select"}
+        session._apply_field_options = {"custom__country": ["Afghanistan", "Albania", "Algeria"]}
+
+        is_valid, _, normalized = session._validate_apply_answer("custom__country", "Thailand")
+        self.assertTrue(is_valid)
+        self.assertEqual(normalized, "Thailand")
 
 
 class _FakeLeaf:

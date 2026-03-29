@@ -1,5 +1,10 @@
 # Job Seeker Agent
 
+## Handover
+
+Comprehensive project handover document:
+- `HANDOVER.md`
+
 ## Development methodology (mandatory)
 
 Before every code-change iteration, follow `SKILL_CHECKLIST.md`.

@@ -5,8 +5,8 @@ Tests for the three patches applied in the 2026-03-27 session:
      and only stops on a second KI within 3 seconds.
   2. Page-signature stagnation – the scan wizard bails after ONE repeated signature
      instead of two (stagnant_signature_streak >= 1).
-  3. Discovery-mode unification – normal run-mode uses the same aggressive
-     prefill path as testing mode during field discovery.
+  3. Discovery-mode split – normal run-mode is incremental (user-driven),
+      while testing mode keeps aggressive auto-prefill discovery.
 """
 import logging
 import tempfile
@@ -267,58 +267,58 @@ class TestStagnantSignatureThreshold(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. Discovery-mode unification: normal mode acts like testing during scan
+# 3. Discovery-mode split: only testing mode uses aggressive prefill
 # ---------------------------------------------------------------------------
 
-class TestDiscoveryModeUnification(unittest.TestCase):
+class TestDiscoveryModeSplit(unittest.TestCase):
     """
-    After the unification patch, a session created with easy_apply_run_mode='normal'
-    must evaluate  ``testing_mode = self._easy_apply_run_mode in {"testing", "normal"}``
-    as True, so that _prefill_required_for_scan uses aggressive fills.
+    After the incremental-flow patch, a session created with easy_apply_run_mode='normal'
+    must evaluate  ``testing_mode = self._easy_apply_run_mode == "testing"``
+    as False, so normal mode no longer performs aggressive auto-prefill scanning.
 
     We cannot call _scan_easy_apply_fields directly (it needs a browser), but we CAN:
       a) confirm the run-mode is stored correctly, and
       b) verify the expression value at the point where testing_mode is computed.
     """
 
-    def test_normal_mode_evaluates_as_testing_mode_true(self):
+    def test_normal_mode_evaluates_as_testing_mode_false(self):
         session = _make_session("normal")
         try:
-            # This is the exact expression from line ~2075 of agent_engine.py
-            testing_mode = session._easy_apply_run_mode in {"testing", "normal"}
-            self.assertTrue(testing_mode, "normal mode should evaluate testing_mode=True for discovery")
+            # This is the exact expression from _scan_easy_apply_fields
+            testing_mode = session._easy_apply_run_mode == "testing"
+            self.assertFalse(testing_mode, "normal mode should be incremental (testing_mode=False)")
         finally:
             _cleanup(session)
 
     def test_testing_mode_evaluates_as_testing_mode_true(self):
         session = _make_session("testing")
         try:
-            testing_mode = session._easy_apply_run_mode in {"testing", "normal"}
+            testing_mode = session._easy_apply_run_mode == "testing"
             self.assertTrue(testing_mode)
         finally:
             _cleanup(session)
 
-    def test_unknown_mode_falls_back_to_normal_and_is_still_true(self):
-        """Unknown modes are normalised to 'normal' by __init__, so still True."""
+    def test_unknown_mode_falls_back_to_normal_and_is_false(self):
+        """Unknown modes are normalised to 'normal' by __init__, so expression is False."""
         session = _make_session("foobar")
         try:
             self.assertEqual(session._easy_apply_run_mode, "normal")
-            testing_mode = session._easy_apply_run_mode in {"testing", "normal"}
-            self.assertTrue(testing_mode)
+            testing_mode = session._easy_apply_run_mode == "testing"
+            self.assertFalse(testing_mode)
         finally:
             _cleanup(session)
 
-    def test_old_expression_would_have_been_false_for_normal(self):
+    def test_old_unified_expression_would_have_been_true_for_normal(self):
         """
-        Regression guard: the OLD expression  ``== "testing"`` returns False for
-        normal mode.  This test documents the bug that was fixed.
+        Regression guard: the OLD unified expression treated normal as testing,
+        which we no longer want for incremental flow.
         """
         session = _make_session("normal")
         try:
-            old_expression_result = session._easy_apply_run_mode == "testing"
-            self.assertFalse(
+            old_expression_result = session._easy_apply_run_mode in {"testing", "normal"}
+            self.assertTrue(
                 old_expression_result,
-                "Confirms the old code was broken for normal mode (regression guard)"
+                "Confirms the old unified logic treated normal mode as testing"
             )
         finally:
             _cleanup(session)

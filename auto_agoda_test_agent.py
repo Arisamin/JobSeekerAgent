@@ -171,6 +171,7 @@ class AutoAgodaTestAgent:
             "linkedin": "https://www.linkedin.com/in/ariel-samin",
             "github": "https://github.com/Arisamin",
             "website": "https://example.com",
+            "agoda_booking_holdings_group_employment": "No",
             "experience_years": "10",
             "notice_period": "1 month",
             "salary_expectation": "30000",

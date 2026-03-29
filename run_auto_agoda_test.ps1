@@ -27,6 +27,7 @@ if ([string]::IsNullOrWhiteSpace($chatId)) {
 }
 
 $env:AGENT_DISABLE_JITTER = "1"
+$env:AGENT_ENABLE_AGODA_FALLBACK = "1"
 $env:TELEGRAM_CHAT_ID = $chatId
 
 $argsList = @(
