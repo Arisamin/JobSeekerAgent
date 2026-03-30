@@ -3696,7 +3696,10 @@ class TelegramJobSession:
 
     def _cmd_apply(self) -> bool:
         if self._current_job is None:
-            self._send("⚠️ No active job selected. Reply <b>Next</b> to get the first job.")
+            if self._state in (self.STATE_BROWSING_NEW, self.STATE_BROWSING_DB):
+                self._send("⚠️ No job is currently displayed. Reply <b>Next</b> to view a job before applying.")
+            else:
+                self._send("⚠️ No active job selected. Reply <b>Next</b> to get the first job.")
             return True
 
         title   = self._current_job.get("title", "?")
@@ -3831,7 +3834,10 @@ class TelegramJobSession:
 
     def _cmd_skip(self) -> bool:
         if self._current_job is None:
-            self._send("⚠️ No active job selected. Reply <b>Next</b> to get the first job.")
+            if self._state in (self.STATE_BROWSING_NEW, self.STATE_BROWSING_DB):
+                self._send("⚠️ No job is currently displayed. Reply <b>Next</b> to view a job before skipping.")
+            else:
+                self._send("⚠️ No active job selected. Reply <b>Next</b> to get the first job.")
             return True
         job_id  = self._current_job.get("id")
         title   = self._current_job.get("title", "?")
@@ -4012,12 +4018,20 @@ class TelegramJobSession:
 
         new_answers: Dict[str, str] = {}
         for field_key, _prompt in self._apply_form_fields:
+            # Priority 1: answer already collected in this session.
             if old_answers.get(field_key):
                 new_answers[field_key] = old_answers[field_key]
                 continue
+            # Priority 2: answer transferable via canonical label equivalence.
             canonical = self._canonicalize_apply_label(self._apply_field_labels.get(field_key, ""))
             if canonical and canonical_answer_map.get(canonical):
                 new_answers[field_key] = canonical_answer_map[canonical]
+                continue
+            # Priority 3: pre-fill from saved profile for fields newly discovered via rescan
+            # (e.g. 'github', 'relocate_bangkok' injected by Agoda fallback).
+            saved_value = (self._saved_profile.get(field_key) or "").strip()
+            if saved_value:
+                new_answers[field_key] = saved_value
         self._apply_answers = new_answers
 
         # Preserve asked-state for equivalent labels to avoid re-asking duplicates.
