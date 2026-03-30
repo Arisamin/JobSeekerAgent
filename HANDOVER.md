@@ -167,6 +167,11 @@ Key implemented improvements:
 
 5. Data quality in saved profile
 - `telegram_profile.json` may accumulate noisy or undesirable custom answers from test sessions; this can skew future prompts/fills.
+- **Resolved:** `telegram_profile.json` was sanitized (offensive entry removed, duplicate test-run groups pruned, `agoda_relationship` corrected to `No`).
+- **Prevention:** `run_auto_agoda_test.ps1` now sets `AGENT_PROFILE_PATH` to `telegram_profile.test.json` so automated test runs write to a separate file and never pollute the production profile.  Set the env var manually in any other test scenario:
+  ```powershell
+  $env:AGENT_PROFILE_PATH = "telegram_profile.test.json"
+  ```
 
 6. Process discipline gaps observed during session
 - At least one patch was reported before rerunning tests; user explicitly flagged this as methodology violation.
@@ -183,17 +188,14 @@ Key implemented improvements:
   - `Easy Apply wizard stopped progressing ...`
 - Capture outcome from latest `Logs/run_*.log` and Telegram outputs.
 
-2. Consolidate duplicated selector constants
-- Move Easy Apply selector list into one shared class constant/helper used by both scan and apply.
+2. ~~Consolidate duplicated selector constants~~ **DONE**
+- `TelegramJobSession._EASY_APPLY_BUTTON_SELECTORS` is now the single shared list; both scan and apply code paths reference it.
 
-3. Add targeted tests for preview loop termination
-- Mock wizard sequence to assert:
-  - submit-step exit
-  - stagnation exit
-  - failsafe-cap exit
+3. ~~Add targeted tests for preview loop termination~~ **DONE**
+- `Tests/test_preview_loop_termination.py` covers submit-step, stagnation, and failsafe-cap exit modes (17 tests).
 
-4. Sanitize persisted profile test pollution
-- Prune invalid/offensive/noise custom fields in `telegram_profile.json` before production runs.
+4. ~~Sanitize persisted profile test pollution~~ **DONE**
+- `telegram_profile.json` sanitized; `run_auto_agoda_test.ps1` uses `AGENT_PROFILE_PATH=telegram_profile.test.json` to isolate future test runs.
 
 5. Keep docs synchronized
 - If behavior changed, update relevant flowcharts and README sections immediately.

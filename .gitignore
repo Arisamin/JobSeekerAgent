@@ -20,6 +20,9 @@ Reports/
 *.db
 .db_lock
 
+# Test-only profile (written by run_auto_agoda_test.ps1 via AGENT_PROFILE_PATH)
+telegram_profile.test.json
+
 # VS Code local settings
 .vscode/
 

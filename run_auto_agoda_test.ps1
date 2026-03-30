@@ -29,6 +29,10 @@ if ([string]::IsNullOrWhiteSpace($chatId)) {
 $env:AGENT_DISABLE_JITTER = "1"
 $env:AGENT_ENABLE_AGODA_FALLBACK = "1"
 $env:TELEGRAM_CHAT_ID = $chatId
+# Use a separate profile file so the auto-test run never writes to the
+# production telegram_profile.json.  The file is created automatically
+# on first use if it does not exist.
+$env:AGENT_PROFILE_PATH = Join-Path $projectRoot "telegram_profile.test.json"
 
 $argsList = @(
     "auto_agoda_test_agent.py",
