@@ -1788,6 +1788,31 @@ class TelegramJobSession:
 
     PROFILE_FILENAME = "telegram_profile.json"
 
+    # Shared token list for recognising the final "Submit" button in any language.
+    # Used by both the scan wizard and the apply wizard so that adding/removing a
+    # language token only requires changing this one list.
+    _SUBMIT_BUTTON_TOKENS: List[str] = ["submit", "تقديم", "إرسال", "ارسال"]
+
+    # Shared selector list for the LinkedIn "Easy Apply" button.  Used by both
+    # _scan_easy_apply_fields() and _do_linkedin_easy_apply() so that any
+    # selector addition/removal is made in exactly one place.
+    _EASY_APPLY_BUTTON_SELECTORS: List[str] = [
+        "span.artdeco-button__text:has-text('Easy Apply')",
+        ".jobs-apply-button",
+        "a.jobs-apply-button",
+        "button.jobs-apply-button",
+        "[data-control-name*='jobdetails_topcard_inapply']",
+        "[data-control-name*='jobdetails_topcard_inapply'] button",
+        ".jobs-apply-button--top-card",
+        ".jobs-s-apply [role='button']",
+        "button:has-text('Easy Apply')",
+        "button[aria-label*='Easy Apply']",
+        ".jobs-s-apply button",
+        "[role='button']:has-text('Easy Apply')",
+        "a:has-text('Easy Apply')",
+        "span:has-text('Easy Apply')",
+    ]
+
     def __init__(
         self,
         bot_token: str,
@@ -1821,7 +1846,14 @@ class TelegramJobSession:
         self._apply_field_options: Dict[str, List[str]] = {}
         self._apply_field_types: Dict[str, str] = {}
         self._return_state_after_apply: str = self.STATE_INTRO
-        self._profile_path: Path = self.db.db_path.parent / self.PROFILE_FILENAME
+        # Allow callers (e.g. test runners) to override the profile path via an
+        # environment variable so that automated test runs never write to the
+        # production telegram_profile.json.
+        _env_profile = os.environ.get("AGENT_PROFILE_PATH", "").strip()
+        self._profile_path: Path = (
+            Path(_env_profile) if _env_profile
+            else self.db.db_path.parent / self.PROFILE_FILENAME
+        )
         self._saved_profile: Dict[str, str] = self._load_saved_profile()
         mode = (easy_apply_run_mode or "normal").strip().lower()
         self._easy_apply_run_mode = mode if mode in {"normal", "testing"} else "normal"
@@ -2312,7 +2344,7 @@ class TelegramJobSession:
             text = (btn_text or "").strip().lower()
             aria = (btn_aria or "").strip().lower()
             haystack = f"{text} {aria}"
-            submit_tokens = ["submit", "ارسال", "إرسال", "تقديم"]
+            submit_tokens = self._SUBMIT_BUTTON_TOKENS
             return any(token in haystack for token in submit_tokens)
 
         def _scan_step(page: Any, scope: Optional[Any] = None) -> None:
@@ -2967,22 +2999,7 @@ class TelegramJobSession:
                     page.wait_for_timeout(3000)
 
                     # Probe for any Easy Apply element (up to 8 s) before the retry loop
-                    EASY_APPLY_SELECTORS = [
-                        "span.artdeco-button__text:has-text('Easy Apply')",
-                        ".jobs-apply-button",
-                        "a.jobs-apply-button",
-                        "button.jobs-apply-button",
-                        "[data-control-name*='jobdetails_topcard_inapply']",
-                        "[data-control-name*='jobdetails_topcard_inapply'] button",
-                        ".jobs-apply-button--top-card",
-                        ".jobs-s-apply [role='button']",
-                        "button:has-text('Easy Apply')",
-                        "button[aria-label*='Easy Apply']",
-                        ".jobs-s-apply button",
-                        "[role='button']:has-text('Easy Apply')",
-                        "a:has-text('Easy Apply')",
-                        "span:has-text('Easy Apply')",
-                    ]
+                    EASY_APPLY_SELECTORS = self._EASY_APPLY_BUTTON_SELECTORS
                     _combined_selector = ", ".join(EASY_APPLY_SELECTORS)
                     try:
                         page.wait_for_selector(_combined_selector, timeout=8000)
@@ -4318,22 +4335,7 @@ class TelegramJobSession:
                     page.wait_for_timeout(2000)
 
                     # ── Step 2: Click Easy Apply button ───────────────────────────
-                    easy_apply_selectors = [
-                        "span.artdeco-button__text:has-text('Easy Apply')",
-                        ".jobs-apply-button",
-                        "a.jobs-apply-button",
-                        "button.jobs-apply-button",
-                        "[data-control-name*='jobdetails_topcard_inapply']",
-                        "[data-control-name*='jobdetails_topcard_inapply'] button",
-                        ".jobs-apply-button--top-card",
-                        ".jobs-s-apply [role='button']",
-                        "button:has-text('Easy Apply')",
-                        "button[aria-label*='Easy Apply']",
-                        ".jobs-s-apply button",
-                        "[role='button']:has-text('Easy Apply')",
-                        "a:has-text('Easy Apply')",
-                        "span:has-text('Easy Apply')",
-                    ]
+                    easy_apply_selectors = self._EASY_APPLY_BUTTON_SELECTORS
                     try:
                         page.wait_for_selector(", ".join(easy_apply_selectors), timeout=8000)
                         self.logger.info("Easy Apply: apply element detected in DOM")
@@ -4420,7 +4422,7 @@ class TelegramJobSession:
                         btn_text = (next_btn.inner_text(timeout=3000) or "").strip().lower()
                         self.logger.info(f"Easy Apply: modal button text = {btn_text!r}")
 
-                        is_submit_action = any(tok in btn_text for tok in ["submit", "تقديم", "إرسال", "ارسال"])
+                        is_submit_action = any(tok in btn_text for tok in self._SUBMIT_BUTTON_TOKENS)
 
                         if is_submit_action and not submit_application:
                             self.logger.info("Easy Apply: reached submit step in preview mode; not clicking submit")
