@@ -104,7 +104,10 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertIn("2) No", prompts_by_key["custom__radio_q"])
         self.assertEqual(prompts_by_key["custom__select_q"], "🔽 Choose your stack (type your choice):")
         self.assertEqual(prompts_by_key["custom__text_q"], "✏️ Tell us about yourself:")
-        self.assertEqual(prompts_by_key["custom__checkbox_q"], "❓ Accept terms (type your answer):")
+        self.assertIn("❓ Accept terms (type your answer):", prompts_by_key["custom__checkbox_q"])
+        self.assertIn("Options:", prompts_by_key["custom__checkbox_q"])
+        self.assertIn("1) Yes", prompts_by_key["custom__checkbox_q"])
+        self.assertIn("2) No", prompts_by_key["custom__checkbox_q"])
 
     def test_build_apply_form_fields_includes_predefined_options(self):
         session = self._make_session()

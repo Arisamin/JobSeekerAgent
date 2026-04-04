@@ -56,11 +56,169 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertTrue(agent_engine.is_generic_choice_label("choose"))
         self.assertFalse(agent_engine.is_generic_choice_label("Gender"))
 
+    def test_section_heading_label_detection_helper(self):
+        self.assertTrue(agent_engine.is_section_heading_label("SUBMIT YOUR APPLICATION"))
+        self.assertTrue(agent_engine.is_section_heading_label("Links"))
+        self.assertTrue(agent_engine.is_section_heading_label("Privacy policy"))
+        self.assertFalse(agent_engine.is_section_heading_label("LinkedIn profile URL"))
+
+    def test_disclaimer_and_option_lines_do_not_override_real_question(self):
+        block = """
+        This question is asked for the purpose of ensuring inclusivity and diversity. Your response is optional and will not affect the evaluation of your application
+        Gender
+        Male
+        Female
+        Non-binary
+        Prefer not to say
+        No, position isn't relevant for me
+        """
+        label = agent_engine.extract_question_label_from_block_text(block)
+        self.assertEqual(label, "Gender")
+
+    def test_section_heading_does_not_override_specific_field_label(self):
+        block = """
+        LINKS
+        LinkedIn profile URL
+        """
+        label = agent_engine.extract_question_label_from_block_text(block)
+        self.assertEqual(label, "LinkedIn profile URL")
+
+    def test_checkbox_questions_default_to_yes_no_prompt_options(self):
+        session = self._make_session()
+        fields = session._build_apply_form_fields([
+            ("custom__privacy_ack", "I agree to the privacy policy", "checkbox"),
+        ])
+        prompt = dict(fields)["custom__privacy_ack"]
+        self.assertIn("Options:", prompt)
+        self.assertIn("1) Yes", prompt)
+        self.assertIn("2) No", prompt)
+
+    def test_binary_radio_question_gets_yes_no_options(self):
+        session = self._make_session()
+        fields = session._build_apply_form_fields([
+            (
+                "custom__commute",
+                "The position is located in Jerusalem and requires on-site work four days per week. Are you ok with commuting to Jerusalem?",
+                "radio",
+            ),
+        ])
+        prompt = dict(fields)["custom__commute"]
+        self.assertIn("Options:", prompt)
+        self.assertIn("1) Yes", prompt)
+        self.assertIn("2) No", prompt)
+
+    def test_family_member_question_not_suppressed_as_option_line(self):
+        block = """
+        ADDITIONAL INFORMATION
+        Do you have any family member working at Mobileye?
+        I don't have any family member working at Mobileye
+        I have a family member working at Mobileye
+        """
+        label = agent_engine.extract_question_label_from_block_text(block)
+        self.assertEqual(label, "Do you have any family member working at Mobileye?")
+
+    def test_choose_card_template_question_label_prefers_concise_card_title_for_long_blurb(self):
+        label = agent_engine.choose_card_template_question_label(
+            card_title="Family member working at Mobileye",
+            field_text=(
+                "We kindly request that you make us aware if a family member of yours is currently employed by "
+                "Mobileye. Due to potential issues that can arise such as conflict of interest, favoritism, "
+                "personal conflicts etc., having this information will enable us to be considerate."
+            ),
+        )
+        self.assertEqual(label, "Family member working at Mobileye")
+
+    def test_choose_card_template_question_label_prefers_title_over_disclaimer(self):
+        label = agent_engine.choose_card_template_question_label(
+            card_title="What is your gender? (optional)",
+            field_text=(
+                "This question is asked for the purpose of ensuring inclusivity and diversity. "
+                "Your response is optional and will not affect the evaluation of your application"
+            ),
+        )
+        self.assertEqual(label, "What is your gender? (optional)")
+
     def test_scan_path_disambiguates_generic_custom_keys(self):
         src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
         self.assertIn("def _disambiguate_generic_key", src)
         self.assertIn("is_generic_choice_label", src)
         self.assertIn("_disambiguate_generic_key(key, label", src)
+
+    def test_scan_path_includes_hidden_required_card_selects(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("include_hidden_select", src)
+        self.assertIn("cards[", src)
+        self.assertIn("including hidden required select", src)
+
+    def test_scan_path_parses_hidden_card_templates(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("baseTemplate", src)
+        self.assertIn("choose_card_template_question_label", src)
+        self.assertIn("parse_lever_base_template_value", src)
+
+    def test_external_scan_uses_multipass_reveal_with_prefill(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("for _pass in range(4)", src)
+        self.assertIn("_prefill_required_for_scan(root, scope=None)", src)
+        self.assertIn("_scroll_root_once(root)", src)
+
+    def test_saved_mobileye_html_contains_parseable_family_member_card_template(self):
+        html_path = Path(__file__).resolve().parents[1] / "Selected HTMLs" / "Mobileye - Senior Software Engineer & Tech Lead [Application].html"
+        self.assertTrue(html_path.exists(), f"Missing artifact: {html_path}")
+
+        html_text = html_path.read_text(encoding="utf-8", errors="ignore")
+        values = agent_engine.extract_lever_base_template_values_from_html(html_text)
+        self.assertGreater(len(values), 0)
+
+        payloads = [agent_engine.parse_lever_base_template_value(v) for v in values]
+        payloads = [p for p in payloads if isinstance(p, dict)]
+        self.assertGreater(len(payloads), 0)
+
+        family_payload = None
+        for payload in payloads:
+            title = (payload.get("text") or "").lower()
+            if "family member" in title and "mobileye" in title:
+                family_payload = payload
+                break
+
+        self.assertIsNotNone(family_payload, "Family member card template not found in saved HTML")
+
+        fields = family_payload.get("fields") or []
+        self.assertGreater(len(fields), 0)
+        options = []
+        for field in fields:
+            if isinstance(field, dict):
+                for opt in (field.get("options") or []):
+                    if isinstance(opt, dict):
+                        text = (opt.get("text") or "").strip()
+                        if text:
+                            options.append(text)
+        joined = " | ".join(options).lower()
+        self.assertIn("don't have any family member", joined)
+        self.assertIn("have a family member", joined)
+
+    def test_saved_mobileye_html_contains_additional_information_textarea(self):
+        html_path = Path(__file__).resolve().parents[1] / "Selected HTMLs" / "Mobileye - Senior Software Engineer & Tech Lead [Application].html"
+        html_text = html_path.read_text(encoding="utf-8", errors="ignore")
+
+        extracted = agent_engine.extract_lever_additional_fields_from_html(html_text)
+        labels = [str(item.get("label", "")) for item in extracted if isinstance(item, dict)]
+        types = [str(item.get("type", "")) for item in extracted if isinstance(item, dict)]
+
+        joined_labels = " | ".join(labels).lower()
+        self.assertIn("cover letter", joined_labels)
+        self.assertIn("text", " | ".join(types).lower())
+
+    def test_saved_mobileye_html_contains_marketing_consent_checkbox(self):
+        html_path = Path(__file__).resolve().parents[1] / "Selected HTMLs" / "Mobileye - Senior Software Engineer & Tech Lead [Application].html"
+        html_text = html_path.read_text(encoding="utf-8", errors="ignore")
+
+        extracted = agent_engine.extract_lever_additional_fields_from_html(html_text)
+        consent = [item for item in extracted if isinstance(item, dict) and str(item.get("type", "")).lower() == "checkbox"]
+        self.assertGreater(len(consent), 0)
+
+        label_blob = " | ".join(str(item.get("label", "")) for item in consent).lower()
+        self.assertIn("mobileye can contact me", label_blob)
 
 
 if __name__ == "__main__":

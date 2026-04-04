@@ -91,9 +91,186 @@ def is_generic_choice_label(value: str) -> bool:
     return lowered in generic_values
 
 
+def is_section_heading_label(value: str) -> bool:
+    text = normalize_form_label(value or "").lower().rstrip(":")
+    headings = {
+        "submit your application",
+        "links",
+        "additional information",
+        "application questions",
+        "voluntary self-identification",
+        "privacy policy",
+    }
+    return text in headings
+
+
+def is_disclaimer_label(value: str) -> bool:
+    text = normalize_form_label(value or "").lower()
+    markers = (
+        "this question is asked for the purpose",
+        "ensuring inclusivity and diversity",
+        "response is optional",
+        "will not affect the evaluation",
+    )
+    return any(marker in text for marker in markers)
+
+
+def choose_card_template_question_label(card_title: str, field_text: str) -> str:
+    """Pick the best user-facing question label from Lever card template content."""
+    title = normalize_form_label(card_title or "")
+    text = normalize_form_label(field_text or "")
+
+    if text and not is_disclaimer_label(text) and not is_section_heading_label(text) and not is_generic_choice_label(text):
+        # Very long explanatory field text is usually less useful than the card title.
+        if title and len(text.split()) > 18 and "?" not in text:
+            return title
+        return text
+
+    if title:
+        return title
+    return text
+
+
+def parse_lever_base_template_value(raw_value: str) -> Optional[Dict[str, Any]]:
+    """Parse a Lever `baseTemplate` hidden input value into a dict payload."""
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+
+    for candidate in (value, html.unescape(value)):
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def extract_lever_base_template_values_from_html(html_text: str) -> List[str]:
+    """Extract raw `baseTemplate` value attributes from saved Lever HTML."""
+    text = html_text or ""
+    values: List[str] = []
+
+    # Attribute order is not guaranteed (`value` may appear before `name`).
+    input_tag_pattern = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
+    name_attr_pattern = re.compile(r"\bname\s*=\s*(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
+    value_attr_pattern = re.compile(r"\bvalue\s*=\s*(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
+
+    for tag in input_tag_pattern.findall(text):
+        name_match = name_attr_pattern.search(tag)
+        if not name_match:
+            continue
+        name_value = name_match.group(2) or ""
+        if "basetemplate" not in name_value.lower():
+            continue
+        value_match = value_attr_pattern.search(tag)
+        if not value_match:
+            continue
+        raw_value = (value_match.group(2) or "").strip()
+        if raw_value:
+            values.append(raw_value)
+
+    return values
+
+
+def extract_lever_additional_fields_from_html(html_text: str) -> List[Dict[str, Any]]:
+    """Extract non-baseTemplate Lever fields that can be missed in live DOM scans."""
+    text = html.unescape(html_text or "")
+    fields: List[Dict[str, Any]] = []
+
+    # Additional information free-text area.
+    textarea_pattern = re.compile(r"<textarea\b[^>]*>", re.IGNORECASE)
+    attr_pattern = re.compile(r"\b([a-zA-Z_:][\w:.-]*)\s*=\s*(['\"])(.*?)\2", re.IGNORECASE | re.DOTALL)
+    for tag in textarea_pattern.findall(text):
+        attrs = {m.group(1).lower(): (m.group(3) or "") for m in attr_pattern.finditer(tag)}
+        name_attr = (attrs.get("name") or "").strip().lower()
+        id_attr = (attrs.get("id") or "").strip().lower()
+        placeholder = normalize_form_label(attrs.get("placeholder") or "")
+        if name_attr != "comments" and id_attr != "additional-information":
+            continue
+        label = placeholder or "Additional information"
+        fields.append({"label": label, "type": "text", "options": []})
+        break
+
+    # Optional marketing consent checkbox.
+    consent_checkbox = re.search(
+        r"<input[^>]*type=['\"]checkbox['\"][^>]*name=['\"]consent\[marketing\]['\"][^>]*>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if consent_checkbox:
+        window_start = max(0, consent_checkbox.start() - 1000)
+        window_end = min(len(text), consent_checkbox.end() + 1200)
+        window = text[window_start:window_end]
+        label = ""
+        p_match = re.search(
+            r"<p[^>]*class=['\"][^'\"]*application-answer-alternative[^'\"]*['\"][^>]*>(.*?)</p>",
+            window,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if p_match:
+            label = normalize_form_label(re.sub(r"<[^>]+>", " ", p_match.group(1) or ""))
+        if label:
+            label = re.sub(r"\bPrivacy\s+policy\b", "", label, flags=re.IGNORECASE).strip()
+            label = normalize_form_label(label)
+        if not label:
+            label = "Yes, Mobileye can contact me about future job opportunities"
+        fields.append({"label": label, "type": "checkbox", "options": ["Yes", "No"]})
+
+    return fields
+
+
+def extract_standard_external_fields_from_html(html_text: str) -> List[Dict[str, Any]]:
+    """Extract common input fields from external application HTML snapshots."""
+    text = html.unescape(html_text or "")
+    fields: List[Dict[str, Any]] = []
+
+    input_pattern = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
+    attr_pattern = re.compile(r"\b([a-zA-Z_:][\w:.-]*)\s*=\s*(['\"])(.*?)\2", re.IGNORECASE | re.DOTALL)
+
+    # Name-based label mapping for common application fields seen across Lever-like forms.
+    name_to_field: Dict[str, Tuple[str, str]] = {
+        "resume": ("Resume / CV", "file"),
+        "name": ("Full name", "text"),
+        "email": ("Email", "email"),
+        "phone": ("Phone", "tel"),
+        "location": ("Current location", "text"),
+        "urls[linkedin]": ("LinkedIn URL", "text"),
+        "urls[github]": ("GitHub URL", "text"),
+        "org": ("Current company", "text"),
+    }
+
+    seen: set = set()
+    for tag in input_pattern.findall(text):
+        attrs = {m.group(1).lower(): (m.group(3) or "") for m in attr_pattern.finditer(tag)}
+        input_name = (attrs.get("name") or "").strip()
+        if not input_name:
+            continue
+        mapped = name_to_field.get(input_name.lower())
+        if not mapped:
+            continue
+        label, default_type = mapped
+        actual_type = (attrs.get("type") or "").strip().lower()
+        field_type = default_type
+        if actual_type in {"file", "email", "tel", "url", "text"}:
+            field_type = actual_type if actual_type != "url" else "text"
+
+        key = (label.lower(), field_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        fields.append({"label": label, "type": field_type, "options": []})
+
+    return fields
+
+
 def extract_question_label_from_block_text(block_text: str) -> str:
     lines = [normalize_form_label(line) for line in (block_text or "").splitlines()]
     lines = [line for line in lines if line]
+    lines = list(dict.fromkeys(lines))
     if not lines:
         return ""
 
@@ -134,23 +311,47 @@ def extract_question_label_from_block_text(block_text: str) -> str:
         lowered = (line or "").lower().strip()
         if lowered in noise_values:
             return True
+        if re.match(r"^(yes|no)(\b|\s|[,:.;!-])", lowered):
+            return True
         if lowered.startswith("i have ") or lowered.startswith("i don't have "):
             return True
         if lowered.startswith("prefer not to say"):
             return True
         return False
 
-    for line in lines:
-        lowered = line.lower()
-        if lowered not in noise_values and not _is_optionish(line) and _has_latin(line) and not is_generic_choice_label(line):
-            return line
+    best_line = ""
+    best_score = -10_000
+    for idx, line in enumerate(lines):
+        lowered = line.lower().strip()
+        words = [w for w in lowered.split() if w]
+        score = 0
 
-    for line in lines:
-        lowered = line.lower()
-        if lowered not in noise_values and not _is_optionish(line) and not is_generic_choice_label(line):
-            return line
+        if "?" in line:
+            score += 120
+        if 2 <= len(words) <= 18:
+            score += 25
+        if _has_latin(line):
+            score += 8
+        if idx > 0:
+            score += min(idx, 3)
+        if line.isupper() and len(words) <= 5:
+            score -= 35
+        if is_generic_choice_label(line):
+            score -= 40
+        if is_section_heading_label(line):
+            score -= 85
+        if is_disclaimer_label(line):
+            score -= 60
+        if _is_optionish(line):
+            score -= 90
+        if lowered in noise_values:
+            score -= 70
 
-    return ""
+        if score > best_score:
+            best_score = score
+            best_line = line
+
+    return best_line if best_score >= 0 else ""
 
 
 def is_linkedin_login_page(url: str) -> bool:
@@ -2290,6 +2491,7 @@ class TelegramJobSession:
         discovered: List[Tuple[str, str, str]] = []
         discovered_options: Dict[str, List[str]] = {}
         seen_keys: set = set()
+        seen_card_template_payload_ids: set = set()
 
         def _random_digits(length: int) -> str:
             return "".join(random.choice("0123456789") for _ in range(length))
@@ -2334,12 +2536,42 @@ class TelegramJobSession:
         def _label_for(page: Any, inp: Any) -> str:
             """Best-effort label text for a form element."""
             generic_candidate = ""
+            attr_candidate = ""
+
+            def _normalize_attr_label(raw_value: str) -> str:
+                raw = (raw_value or "").strip()
+                if not raw:
+                    return ""
+                raw = re.sub(r"[\[\]{}()]+", " ", raw)
+                raw = re.sub(r"[_\-/.]+", " ", raw)
+                raw = normalize_form_label(raw)
+                lowered = raw.lower()
+                if len(raw) < 3:
+                    return ""
+                if lowered in {"input", "field", "question", "answer", "text", "value", "name", "id"}:
+                    return ""
+                if re.fullmatch(r"[a-z]*\d+[a-z0-9\s]*", lowered):
+                    return ""
+                if is_generic_choice_label(raw) or is_section_heading_label(raw):
+                    return ""
+                return raw
+
+            for attr in ("name", "autocomplete", "id", "data-testid", "data-qa"):
+                try:
+                    raw_attr = inp.get_attribute(attr, timeout=250) or ""
+                    normalized_attr = _normalize_attr_label(raw_attr)
+                    if normalized_attr:
+                        attr_candidate = normalized_attr
+                        break
+                except Exception:
+                    continue
+
             for attr in ("aria-label",):
                 try:
                     v = inp.get_attribute(attr, timeout=400)
                     if v and v.strip():
                         normalized = normalize_form_label(v)
-                        if normalized and not is_generic_choice_label(normalized):
+                        if normalized and not is_generic_choice_label(normalized) and not is_section_heading_label(normalized):
                             return normalized
                         if normalized and not generic_candidate:
                             generic_candidate = normalized
@@ -2353,7 +2585,7 @@ class TelegramJobSession:
                         t = lbl.inner_text(timeout=400)
                         if t and t.strip():
                             normalized = normalize_form_label(t)
-                            if normalized and not is_generic_choice_label(normalized):
+                            if normalized and not is_generic_choice_label(normalized) and not is_section_heading_label(normalized):
                                 return normalized
                             if normalized and not generic_candidate:
                                 generic_candidate = normalized
@@ -2380,11 +2612,19 @@ class TelegramJobSession:
                         continue
                     candidate = extract_question_label_from_block_text(ctx_text)
                     if candidate and not is_generic_choice_label(candidate):
+                        if is_section_heading_label(candidate) or is_disclaimer_label(candidate):
+                            if attr_candidate:
+                                return attr_candidate
+                            if candidate and not generic_candidate:
+                                generic_candidate = candidate
+                            continue
                         return candidate
                     if candidate and not generic_candidate:
                         generic_candidate = candidate
                 except Exception:
                     continue
+            if attr_candidate:
+                return attr_candidate
             return generic_candidate
 
         def _profile_key_for(label: str) -> Optional[str]:
@@ -2476,13 +2716,86 @@ class TelegramJobSession:
 
         def _scan_step(page: Any, scope: Optional[Any] = None) -> None:
             root = scope if scope is not None else page
+
+            def _add_from_card_template_payload(template_payload: Dict[str, Any]) -> int:
+                if not isinstance(template_payload, dict):
+                    return 0
+
+                try:
+                    payload_id = (template_payload.get("id") or "").strip() or hashlib.sha1(
+                        json.dumps(template_payload, sort_keys=True, ensure_ascii=False).encode("utf-8", errors="ignore")
+                    ).hexdigest()
+                except Exception:
+                    payload_id = ""
+
+                if payload_id and payload_id in seen_card_template_payload_ids:
+                    return 0
+
+                card_title = normalize_form_label(template_payload.get("text", "") or "")
+                fields = template_payload.get("fields") or []
+                if not isinstance(fields, list):
+                    return 0
+
+                added = 0
+                for field in fields:
+                    if not isinstance(field, dict):
+                        continue
+                    field_type_raw = (field.get("type") or "").strip().lower()
+                    field_text = normalize_form_label(field.get("text", "") or "")
+                    label = choose_card_template_question_label(card_title, field_text)
+                    if not label:
+                        continue
+
+                    options: List[str] = []
+                    for opt in (field.get("options") or []):
+                        if isinstance(opt, dict):
+                            txt = normalize_form_label(opt.get("text", "") or "")
+                        else:
+                            txt = normalize_form_label(str(opt or ""))
+                        if txt:
+                            options.append(txt)
+
+                    if field_type_raw in {"dropdown", "select", "multi_select"}:
+                        ftype = "select"
+                    elif field_type_raw in {"checkbox", "boolean"}:
+                        ftype = "checkbox"
+                    elif field_type_raw in {"radio"}:
+                        ftype = "radio"
+                    else:
+                        ftype = "text"
+
+                    if not options and ftype in {"checkbox", "radio"}:
+                        options = ["Yes", "No"]
+
+                    pk = _profile_key_for(label)
+                    key = pk if pk else self._custom_key_from_label(label)
+                    if not pk:
+                        key = _disambiguate_generic_key(key, label, card_title or "card-template")
+
+                    before_count = len(discovered)
+                    _add(key, label, ftype, options=options)
+                    if len(discovered) > before_count:
+                        added += 1
+
+                if payload_id:
+                    seen_card_template_payload_ids.add(payload_id)
+                return added
             # File inputs
             for fi in root.locator("input[type='file']").all():
                 try:
                     if not fi.is_visible(timeout=400):
                         continue
                     label = _label_for(page, fi)
+                    fi_name = ""
+                    try:
+                        fi_name = (fi.get_attribute("name", timeout=250) or "").strip().lower()
+                    except Exception:
+                        fi_name = ""
                     ll = label.lower()
+                    if "linkedin profile" in ll and fi_name in {"resume", "cv", "resume_upload"}:
+                        # AWLI LinkedIn import block can leak this heading into the file input label.
+                        label = "Resume / CV"
+                        ll = label.lower()
                     if "cover" in ll:
                         _add("cover_letter_path", label or "Cover letter", "file")
                     else:
@@ -2531,7 +2844,21 @@ class TelegramJobSession:
             # Select dropdowns
             for sel_el in root.locator("select").all():
                 try:
-                    if not sel_el.is_visible(timeout=400):
+                    include_hidden_select = False
+                    try:
+                        if not sel_el.is_visible(timeout=400):
+                            name_attr = (sel_el.get_attribute("name", timeout=200) or "").strip().lower()
+                            required_attr = sel_el.get_attribute("required", timeout=200)
+                            option_count = sel_el.locator("option").count()
+                            if option_count >= 2 and (
+                                required_attr is not None
+                                or "cards[" in name_attr
+                                or "field" in name_attr
+                            ):
+                                include_hidden_select = True
+                            else:
+                                continue
+                    except Exception:
                         continue
                     label = _label_for(page, sel_el)
                     if not label:
@@ -2568,6 +2895,11 @@ class TelegramJobSession:
                                 pass  # scrolling failed, but we have initial options
                     except Exception:
                         pass
+                    if include_hidden_select:
+                        # Hidden native <select> often backs a visible custom dropdown widget.
+                        # Keep these required controls so we do not miss questions like
+                        # "Family member working at Mobileye".
+                        self.logger.info(f"Scan: including hidden required select for label '{label}'")
                     _add(key, label, "select", options=options)
                 except Exception:
                     pass
@@ -2718,14 +3050,119 @@ class TelegramJobSession:
                 try:
                     if not chk.is_visible(timeout=300):
                         continue
-                    label = _label_for(page, chk)
+
+                    def _checkbox_label(inp: Any) -> str:
+                        try:
+                            inp_id = (inp.get_attribute("id", timeout=250) or "").strip()
+                        except Exception:
+                            inp_id = ""
+
+                        if inp_id:
+                            try:
+                                lbl = page.locator(f"label[for='{inp_id}']").first
+                                if lbl.count() > 0:
+                                    txt = normalize_form_label(lbl.inner_text(timeout=400) or "")
+                                    if txt and not is_section_heading_label(txt):
+                                        return txt
+                            except Exception:
+                                pass
+
+                        try:
+                            parent_lbl = inp.locator("xpath=ancestor::label[1]").first
+                            if parent_lbl.count() > 0:
+                                txt = normalize_form_label(parent_lbl.inner_text(timeout=400) or "")
+                                if txt and not is_section_heading_label(txt):
+                                    return txt
+                        except Exception:
+                            pass
+
+                        return _label_for(page, inp)
+
+                    label = _checkbox_label(chk)
                     if not label:
                         continue
                     pk = _profile_key_for(label)
                     key = pk if pk else self._custom_key_from_label(label)
-                    _add(key, label, "checkbox")
+                    _add(key, label, "checkbox", options=["Yes", "No"])
                 except Exception:
                     continue
+
+            # Lever card templates encoded as hidden JSON can contain question/option
+            # metadata even when the native control is hidden behind custom UI.
+            card_templates_added = 0
+            for card in root.locator("input[type='hidden'][name*='baseTemplate'], input[type='hidden'][name*='basetemplate']").all():
+                try:
+                    raw_value = (card.get_attribute("value", timeout=300) or "").strip()
+                    if not raw_value:
+                        try:
+                            raw_value = (card.input_value(timeout=300) or "").strip()
+                        except Exception:
+                            raw_value = ""
+                    if not raw_value:
+                        try:
+                            raw_value = (card.evaluate("el => (el && (el.value || el.getAttribute('value') || ''))") or "").strip()
+                        except Exception:
+                            raw_value = ""
+                    if not raw_value:
+                        continue
+
+                    template_payload = parse_lever_base_template_value(raw_value)
+                    if not isinstance(template_payload, dict):
+                        continue
+                    card_templates_added += _add_from_card_template_payload(template_payload)
+                except Exception:
+                    continue
+
+            # Fallback: parse raw HTML snapshot for baseTemplate payloads. Some live
+            # Lever pages expose templates in markup but not through straightforward
+            # hidden-input attribute reads.
+            try:
+                html_text = root.content()
+                for raw_value in extract_lever_base_template_values_from_html(html_text):
+                    template_payload = parse_lever_base_template_value(raw_value)
+                    if isinstance(template_payload, dict):
+                        card_templates_added += _add_from_card_template_payload(template_payload)
+
+                # Also recover additional fields that may be present in page markup
+                # but not reliably discoverable via visible DOM controls.
+                extra_fields_added = 0
+                for extra in extract_lever_additional_fields_from_html(html_text):
+                    label = normalize_form_label(extra.get("label", "") or "")
+                    if not label:
+                        continue
+                    ftype = (extra.get("type") or "text").strip().lower()
+                    if ftype not in {"text", "select", "radio", "checkbox", "textarea", "file", "email", "tel"}:
+                        ftype = "text"
+                    options = extra.get("options") or []
+                    pk = _profile_key_for(label)
+                    key = pk if pk else self._custom_key_from_label(label)
+                    before_count = len(discovered)
+                    _add(key, label, ftype, options=options)
+                    if len(discovered) > before_count:
+                        extra_fields_added += 1
+
+                for extra in extract_standard_external_fields_from_html(html_text):
+                    label = normalize_form_label(extra.get("label", "") or "")
+                    if not label:
+                        continue
+                    ftype = (extra.get("type") or "text").strip().lower()
+                    if ftype not in {"text", "select", "radio", "checkbox", "textarea", "file", "email", "tel"}:
+                        ftype = "text"
+                    options = extra.get("options") or []
+                    pk = _profile_key_for(label)
+                    key = pk if pk else self._custom_key_from_label(label)
+                    before_count = len(discovered)
+                    _add(key, label, ftype, options=options)
+                    if len(discovered) > before_count:
+                        extra_fields_added += 1
+
+                if extra_fields_added > 0:
+                    self.logger.info(f"Scan: recovered {extra_fields_added} additional field(s) from external HTML")
+            except Exception:
+                pass
+
+            if card_templates_added > 0:
+                self.logger.info(f"Scan: parsed {card_templates_added} field(s) from Lever baseTemplate payloads")
 
         def _current_page_signature(page: Any, scope: Optional[Any] = None) -> str:
             root = scope if scope is not None else page
@@ -2878,7 +3315,21 @@ class TelegramJobSession:
             for sel_el in root.locator("select").all():
                 try:
                     if not sel_el.is_visible(timeout=300):
-                        continue
+                        try:
+                            name_attr = (sel_el.get_attribute("name", timeout=200) or "").strip().lower()
+                            required_attr = sel_el.get_attribute("required", timeout=200)
+                            option_count = sel_el.locator("option").count()
+                            if not (
+                                option_count >= 2
+                                and (
+                                    required_attr is not None
+                                    or "cards[" in name_attr
+                                    or "field" in name_attr
+                                )
+                            ):
+                                continue
+                        except Exception:
+                            continue
                     options = sel_el.locator("option").all()
                     candidates: List[str] = []
                     desired_answer = (_answer_for_label(_label_for(page, sel_el)) or "").strip().lower()
@@ -3289,7 +3740,47 @@ class TelegramJobSession:
                         except Exception:
                             pass
 
+                        def _scroll_root_once(root_obj: Any) -> None:
+                            # Page/Frame roots
+                            try:
+                                root_obj.evaluate(
+                                    "window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight))"
+                                )
+                            except Exception:
+                                pass
+
+                            # Common scrollable containers in Lever/apply forms
+                            try:
+                                for sel in [
+                                    ".application-form",
+                                    ".application-question",
+                                    "[data-qa='additional-cards']",
+                                    ".section.page-centered.application-form",
+                                    "form",
+                                ]:
+                                    try:
+                                        root_obj.evaluate(
+                                            "(selector) => { document.querySelectorAll(selector).forEach(el => { try { el.scrollTop = el.scrollHeight; } catch (_) {} }); }",
+                                            sel,
+                                        )
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+
+                            try:
+                                scan_page.wait_for_timeout(350)
+                            except Exception:
+                                pass
+
+                        # External forms (Lever/custom widgets) can reveal additional required
+                        # card questions only after values are selected and lower sections are
+                        # scrolled into view, so do a few passive reveal passes.
                         for root in scan_roots:
+                            for _pass in range(4):
+                                _scan_step(root, scope=None)
+                                _prefill_required_for_scan(root, scope=None)
+                                _scroll_root_once(root)
                             _scan_step(root, scope=None)
 
                         new_fields = len(discovered) - before
@@ -3524,7 +4015,14 @@ class TelegramJobSession:
             lower = normalized.lower()
             return (
                 "?" in normalized
-                and bool(re.match(r"^(are|do|did|does|is|can|have|has|will|would|were|was)\b", lower))
+                and (
+                    bool(re.match(r"^(are|do|did|does|is|can|have|has|will|would|were|was)\b", lower))
+                    or " are you " in f" {lower} "
+                    or " do you " in f" {lower} "
+                    or " have you " in f" {lower} "
+                    or " yes" in f" {lower} "
+                    or " no" in f" {lower} "
+                )
             )
 
         for key, label, ftype in scanned:
@@ -3543,6 +4041,9 @@ class TelegramJobSession:
                 options = ["Yes", "No"]
                 self._apply_field_options[key] = options
             if not options and ftype in {"radio", "checkbox"} and _looks_binary_question(clean_label):
+                options = ["Yes", "No"]
+                self._apply_field_options[key] = options
+            if not options and ftype == "checkbox":
                 options = ["Yes", "No"]
                 self._apply_field_options[key] = options
             options_block = ""
@@ -5117,6 +5618,69 @@ class TelegramJobSession:
                             continue
                 except Exception:
                     continue
+
+            # Standalone checkboxes not wrapped in fieldset
+            for chk in page.locator("input[type='checkbox']").all():
+                try:
+                    if not chk.is_visible(timeout=500):
+                        continue
+
+                    label_text = ""
+                    try:
+                        chk_id = (chk.get_attribute("id", timeout=250) or "").strip()
+                    except Exception:
+                        chk_id = ""
+
+                    if chk_id:
+                        try:
+                            lbl = page.locator(f"label[for='{chk_id}']").first
+                            if lbl.count() > 0:
+                                label_text = normalize_form_label(lbl.inner_text(timeout=300) or "")
+                        except Exception:
+                            pass
+
+                    if not label_text:
+                        try:
+                            parent_lbl = chk.locator("xpath=ancestor::label[1]").first
+                            if parent_lbl.count() > 0:
+                                label_text = normalize_form_label(parent_lbl.inner_text(timeout=300) or "")
+                        except Exception:
+                            pass
+
+                    if not label_text:
+                        label_text = _get_label(chk)
+                    if not label_text:
+                        continue
+
+                    desired = (_answer_for_label(label_text) or "").strip().lower()
+                    if not desired:
+                        continue
+
+                    should_check = desired in {"1", "yes", "y", "true", "agree", "ok", "accept"}
+                    should_uncheck = desired in {"2", "no", "n", "false", "decline", "disagree"}
+                    if not should_check and not should_uncheck:
+                        continue
+
+                    checked_now = False
+                    try:
+                        checked_now = bool(chk.is_checked(timeout=300))
+                    except Exception:
+                        checked_now = False
+
+                    if should_check and not checked_now:
+                        try:
+                            chk.check(timeout=2000)
+                        except Exception:
+                            chk.click(timeout=2000)
+                        self.logger.info(f"Easy Apply: checked checkbox for '{label_text}'")
+                    elif should_uncheck and checked_now:
+                        try:
+                            chk.uncheck(timeout=2000)
+                        except Exception:
+                            chk.click(timeout=2000)
+                        self.logger.info(f"Easy Apply: unchecked checkbox for '{label_text}'")
+                except Exception:
+                    continue
         except Exception as exc:
             self.logger.warning(f"Easy Apply fill step error: {exc}")
 
@@ -5248,7 +5812,7 @@ TelegramJobSession.LABEL_TO_PROFILE_KEY = [
     (re.compile(r"last.?name",                  re.I), "full_name"),
     (re.compile(r"full.?name|your name",        re.I), "full_name"),
     (re.compile(r"email",                       re.I), "email"),
-    (re.compile(r"phone|mobile",                re.I), "phone"),
+    (re.compile(r"\bphone\b|\bmobile(?!ye)\b", re.I), "phone"),
     (re.compile(r"city|location|address",       re.I), "location"),
     (re.compile(r"linkedin",                    re.I), "linkedin"),
     (re.compile(r"github",                      re.I), "github"),
