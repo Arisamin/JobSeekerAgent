@@ -13,6 +13,43 @@ Param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Get-AgentEngineProcessIds {
+    $procs = Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -match "python" -and $_.CommandLine -match "agent_engine.py"
+    }
+    return @($procs | Select-Object -ExpandProperty ProcessId)
+}
+
+function Stop-NewAgentProcesses {
+    param(
+        [int[]]$BaselineProcessIds
+    )
+
+    $baseline = @{}
+    foreach ($pid in ($BaselineProcessIds | Where-Object { $_ -gt 0 })) {
+        $baseline[$pid] = $true
+    }
+
+    $current = Get-AgentEngineProcessIds
+    $launchedByThisRun = @($current | Where-Object { -not $baseline.ContainsKey($_) })
+    if (-not $launchedByThisRun -or $launchedByThisRun.Count -eq 0) {
+        Write-Host "[RUNNER] Cleanup: no newly launched agent_engine.py process to stop." -ForegroundColor DarkGray
+        return
+    }
+
+    foreach ($pid in $launchedByThisRun) {
+        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
+
+    $remaining = Get-AgentEngineProcessIds | Where-Object { $launchedByThisRun -contains $_ }
+    if ($remaining) {
+        Write-Host "[RUNNER] Cleanup warning: could not stop agent_engine.py PIDs: $($remaining -join ', ')" -ForegroundColor Yellow
+        return
+    }
+    Write-Host "[RUNNER] Cleanup: stopped launched agent_engine.py PIDs: $($launchedByThisRun -join ', ')" -ForegroundColor Green
+}
+
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
@@ -61,8 +98,15 @@ if ($PreviewBeforeSubmit) {
 Write-Host "[RUNNER] Starting auto test..." -ForegroundColor Cyan
 Write-Host "[RUNNER] Job match: $JobMatch | Scrape: $($NoScrape -eq $false) | Headed scrape: $($Headed.IsPresent)" -ForegroundColor Cyan
 
-& $pythonExe @argsList
-$exitCode = $LASTEXITCODE
+$baselineAgentPids = Get-AgentEngineProcessIds
+$exitCode = 1
+try {
+    & $pythonExe @argsList
+    $exitCode = $LASTEXITCODE
+}
+finally {
+    Stop-NewAgentProcesses -BaselineProcessIds $baselineAgentPids
+}
 
 if ($exitCode -eq 0) {
     Write-Host "[RUNNER] PASS" -ForegroundColor Green

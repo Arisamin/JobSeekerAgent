@@ -12,6 +12,7 @@ Before every code-change iteration, follow `SKILL_CHECKLIST.md`.
 - Checklist file: `SKILL_CHECKLIST.md`
 - Flowcharts to keep aligned with logic changes:
 	- `FLOWCHART_STATE_MACHINE.md`
+	- `FLOWCHART_TEST_RUN.md`
 	- `FLOWCHART_SKIPPED_MAINTENANCE.md`
 	- `FLOWCHART_USER_DB_UPDATE.md`
 

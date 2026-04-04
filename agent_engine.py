@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from urllib.parse import urlparse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass, field
@@ -71,6 +72,25 @@ def normalize_form_label(value: str) -> str:
     return normalize_space(label)
 
 
+def is_generic_choice_label(value: str) -> bool:
+    text = normalize_form_label(value or "")
+    lowered = text.lower().rstrip(":")
+    generic_values = {
+        "",
+        "select",
+        "select...",
+        "select…",
+        "choose",
+        "choose...",
+        "choose…",
+        "choose one",
+        "select one",
+        "option",
+        "options",
+    }
+    return lowered in generic_values
+
+
 def extract_question_label_from_block_text(block_text: str) -> str:
     lines = [normalize_form_label(line) for line in (block_text or "").splitlines()]
     lines = [line for line in lines if line]
@@ -98,21 +118,39 @@ def extract_question_label_from_block_text(block_text: str) -> str:
         "prefer not to say",
         "select",
         "choose",
+        "select...",
+        "select…",
+        "choose...",
+        "choose…",
+        "male",
+        "female",
+        "non-binary",
         "next",
         "review",
         "submit",
     }
+
+    def _is_optionish(line: str) -> bool:
+        lowered = (line or "").lower().strip()
+        if lowered in noise_values:
+            return True
+        if lowered.startswith("i have ") or lowered.startswith("i don't have "):
+            return True
+        if lowered.startswith("prefer not to say"):
+            return True
+        return False
+
     for line in lines:
         lowered = line.lower()
-        if lowered not in noise_values and _has_latin(line):
+        if lowered not in noise_values and not _is_optionish(line) and _has_latin(line) and not is_generic_choice_label(line):
             return line
 
     for line in lines:
         lowered = line.lower()
-        if lowered not in noise_values:
+        if lowered not in noise_values and not _is_optionish(line) and not is_generic_choice_label(line):
             return line
 
-    return lines[0]
+    return ""
 
 
 def is_linkedin_login_page(url: str) -> bool:
@@ -1797,20 +1835,40 @@ class TelegramJobSession:
     # _scan_easy_apply_fields() and _do_linkedin_easy_apply() so that any
     # selector addition/removal is made in exactly one place.
     _EASY_APPLY_BUTTON_SELECTORS: List[str] = [
-        "span.artdeco-button__text:has-text('Easy Apply')",
-        ".jobs-apply-button",
-        "a.jobs-apply-button",
-        "button.jobs-apply-button",
-        "[data-control-name*='jobdetails_topcard_inapply']",
         "[data-control-name*='jobdetails_topcard_inapply'] button",
+        "[data-control-name*='jobdetails_topcard_inapply']",
         ".jobs-apply-button--top-card",
-        ".jobs-s-apply [role='button']",
+        "button.jobs-apply-button--top-card",
+        ".jobs-details-top-card__job-actions .jobs-apply-button",
+        "button.jobs-apply-button",
+        "a.jobs-apply-button",
+        ".jobs-apply-button",
         "button:has-text('Easy Apply')",
         "button[aria-label*='Easy Apply']",
         ".jobs-s-apply button",
-        "[role='button']:has-text('Easy Apply')",
-        "a:has-text('Easy Apply')",
-        "span:has-text('Easy Apply')",
+    ]
+
+    _STRICT_TOP_CARD_APPLY_SELECTORS: List[str] = [
+        "[data-control-name*='jobdetails_topcard_inapply'] button",
+        "[data-control-name*='jobdetails_topcard_inapply']",
+        ".jobs-apply-button--top-card",
+        "button.jobs-apply-button--top-card",
+        ".jobs-details-top-card__job-actions .jobs-apply-button",
+        "button.jobs-apply-button",
+        "a.jobs-apply-button",
+    ]
+
+    # Fallback selectors for non-Easy external apply entries.
+    # Used only when Easy Apply entry points are not found/clickable.
+    _GENERAL_APPLY_BUTTON_SELECTORS: List[str] = [
+        "[data-control-name*='applyRouteControl'] button",
+        "[data-control-name*='applyRouteControl']",
+        "button:has-text('Apply with LinkedIn')",
+        "a:has-text('Apply with LinkedIn')",
+        "button:has-text('Apply on company site')",
+        "a:has-text('Apply on company site')",
+        "button:has-text('Apply')",
+        "a:has-text('Apply')",
     ]
 
     def __init__(
@@ -1857,6 +1915,45 @@ class TelegramJobSession:
         self._saved_profile: Dict[str, str] = self._load_saved_profile()
         mode = (easy_apply_run_mode or "normal").strip().lower()
         self._easy_apply_run_mode = mode if mode in {"normal", "testing"} else "normal"
+
+    @staticmethod
+    def _classify_apply_flow_transition(
+        pre_click_url: str,
+        post_click_url: str,
+        pre_page_count: int,
+        post_page_count: int,
+    ) -> str:
+        """
+        Classify what happened after clicking an apply entry point.
+
+        Returns one of:
+        - "external_popup": a new page/tab opened
+        - "external_same_tab": current page navigated away from LinkedIn job view
+        - "linkedin_internal_navigation": click moved to another LinkedIn jobs page
+        - "easy_apply": stayed on current LinkedIn job page (modal-style flow)
+        """
+        if post_page_count > pre_page_count:
+            return "external_popup"
+
+        pre = urlparse((pre_click_url or "").strip())
+        post = urlparse((post_click_url or "").strip())
+        pre_host = (pre.netloc or "").lower()
+        post_host = (post.netloc or "").lower()
+        pre_path = (pre.path or "").lower()
+        post_path = (post.path or "").lower()
+
+        if pre_host and post_host and pre_host != post_host:
+            return "external_same_tab"
+
+        if "linkedin.com" in post_host and pre_path.startswith("/jobs/view") and post_path.startswith("/jobs/"):
+            if not post_path.startswith("/jobs/view"):
+                return "linkedin_internal_navigation"
+
+        # LinkedIn redirects to non-job paths should be treated as external apply flow.
+        if "linkedin.com" in post_host and pre_path.startswith("/jobs/view") and not post_path.startswith("/jobs/view"):
+            return "external_same_tab"
+
+        return "easy_apply"
 
     # ------------------------------------------------------------------
     # Low-level Telegram send helpers
@@ -2236,11 +2333,16 @@ class TelegramJobSession:
 
         def _label_for(page: Any, inp: Any) -> str:
             """Best-effort label text for a form element."""
+            generic_candidate = ""
             for attr in ("aria-label",):
                 try:
                     v = inp.get_attribute(attr, timeout=400)
                     if v and v.strip():
-                        return normalize_form_label(v)
+                        normalized = normalize_form_label(v)
+                        if normalized and not is_generic_choice_label(normalized):
+                            return normalized
+                        if normalized and not generic_candidate:
+                            generic_candidate = normalized
                 except Exception:
                     pass
             try:
@@ -2250,27 +2352,40 @@ class TelegramJobSession:
                     if lbl.count() > 0:
                         t = lbl.inner_text(timeout=400)
                         if t and t.strip():
-                            return normalize_form_label(t)
+                            normalized = normalize_form_label(t)
+                            if normalized and not is_generic_choice_label(normalized):
+                                return normalized
+                            if normalized and not generic_candidate:
+                                generic_candidate = normalized
             except Exception:
                 pass
             try:
                 t = inp.get_attribute("placeholder", timeout=400)
                 if t and t.strip():
-                    return normalize_form_label(t)
+                    normalized = normalize_form_label(t)
+                    if normalized and not is_generic_choice_label(normalized):
+                        return normalized
+                    if normalized and not generic_candidate:
+                        generic_candidate = normalized
             except Exception:
                 pass
-            # Walk up to the nearest fieldset/div and grab its first text node
-            try:
-                ctx_text = (
-                    inp.locator("xpath=ancestor::*[self::fieldset or self::div][1]")
-                    .inner_text(timeout=400)
-                    .strip()
-                )
-                if ctx_text:
-                    return extract_question_label_from_block_text(ctx_text)
-            except Exception:
-                pass
-            return ""
+            # Walk up several ancestors and prefer non-generic question text.
+            for depth in range(1, 6):
+                try:
+                    anc = inp.locator(f"xpath=ancestor::*[self::fieldset or self::div][{depth}]").first
+                    if anc.count() == 0:
+                        continue
+                    ctx_text = (anc.inner_text(timeout=400) or "").strip()
+                    if not ctx_text:
+                        continue
+                    candidate = extract_question_label_from_block_text(ctx_text)
+                    if candidate and not is_generic_choice_label(candidate):
+                        return candidate
+                    if candidate and not generic_candidate:
+                        generic_candidate = candidate
+                except Exception:
+                    continue
+            return generic_candidate
 
         def _profile_key_for(label: str) -> Optional[str]:
             label_lower = label.lower()
@@ -2312,6 +2427,8 @@ class TelegramJobSession:
                 lowered = normalized.lower()
                 if lowered in {"select", "choose", "اختر", "--", "n/a", "na"}:
                     continue
+                if lowered in {"select...", "select…", "choose...", "choose…"}:
+                    continue
                 if lowered.startswith("select ") or lowered.startswith("choose "):
                     continue
                 if any(existing.lower() == lowered for existing in bucket):
@@ -2329,6 +2446,16 @@ class TelegramJobSession:
                 return
             seen_keys.add(key)
             discovered.append((key, label, ftype))
+
+        def _disambiguate_generic_key(key: str, label: str, source_hint: str) -> str:
+            if not key.startswith("custom__"):
+                return key
+            if not is_generic_choice_label(label):
+                return key
+            hint = normalize_form_label(source_hint or "")
+            if not hint:
+                return key
+            return self._custom_key_from_label(f"{label} {hint}")
 
         def _is_advance_action(btn_text: str, btn_aria: str) -> bool:
             text = (btn_text or "").strip().lower()
@@ -2411,6 +2538,14 @@ class TelegramJobSession:
                         continue
                     pk = _profile_key_for(label)
                     key = pk if pk else self._custom_key_from_label(label)
+                    if not pk:
+                        try:
+                            source_hint = (sel_el.get_attribute("name", timeout=200) or "").strip() or (
+                                sel_el.get_attribute("id", timeout=200) or ""
+                            ).strip()
+                        except Exception:
+                            source_hint = ""
+                        key = _disambiguate_generic_key(key, label, source_hint)
                     options: List[str] = []
                     try:
                         # Capture initial options
@@ -2447,6 +2582,14 @@ class TelegramJobSession:
                         continue
                     pk = _profile_key_for(label)
                     key = pk if pk else self._custom_key_from_label(label)
+                    if not pk:
+                        try:
+                            source_hint = (cb.get_attribute("name", timeout=200) or "").strip() or (
+                                cb.get_attribute("id", timeout=200) or ""
+                            ).strip()
+                        except Exception:
+                            source_hint = ""
+                        key = _disambiguate_generic_key(key, label, source_hint)
                     _add(key, label, "select")
                 except Exception:
                     continue
@@ -2477,6 +2620,8 @@ class TelegramJobSession:
                         pass
                     pk = _profile_key_for(legend)
                     key = pk if pk else self._custom_key_from_label(legend)
+                    if not pk:
+                        key = _disambiguate_generic_key(key, legend, f"fieldset-{len(seen_keys)}")
                     option_labels: List[str] = []
                     try:
                         for lbl in fieldset.locator("label").all():
@@ -2521,6 +2666,8 @@ class TelegramJobSession:
 
                     pk = _profile_key_for(label)
                     key = pk if pk else self._custom_key_from_label(label)
+                    if not pk:
+                        key = _disambiguate_generic_key(key, label, name)
                     option_labels: List[str] = []
                     try:
                         for idx in range(min(group.count(), 8)):
@@ -2552,6 +2699,8 @@ class TelegramJobSession:
                         continue
                     pk = _profile_key_for(label)
                     key = pk if pk else self._custom_key_from_label(label)
+                    if not pk:
+                        key = _disambiguate_generic_key(key, label, f"ariarg-{len(seen_keys)}")
                     option_labels: List[str] = []
                     try:
                         lines = [normalize_form_label(line) for line in rg.inner_text(timeout=300).splitlines()]
@@ -3008,24 +3157,34 @@ class TelegramJobSession:
                         self.logger.warning("Scan: wait_for_selector timed out – button may not be present")
 
                     clicked = False
-                    for _attempt in range(3):
-                        if _attempt > 0:
-                            page.wait_for_timeout(1500)
-                        for sel in EASY_APPLY_SELECTORS:
-                            try:
-                                btn = page.locator(sel).first
-                                if btn.count() > 0 and btn.is_visible(timeout=3000):
-                                    btn.click(timeout=5000)
-                                    clicked = True
-                                    self.logger.info(
-                                        f"Scan: clicked Easy Apply via {sel!r} "
-                                        f"(attempt {_attempt + 1})"
-                                    )
-                                    break
-                            except Exception:
-                                continue
+                    click_label = "Easy Apply"
+                    pre_click_page_count = len(ctx.pages)
+                    pre_click_url = page.url
+
+                    def _try_click_apply(selectors: List[str], attempts: int, kind: str) -> bool:
+                        for _attempt in range(attempts):
+                            if _attempt > 0:
+                                page.wait_for_timeout(1500)
+                            for sel in selectors:
+                                try:
+                                    btn = page.locator(sel).first
+                                    if btn.count() > 0 and btn.is_visible(timeout=3000):
+                                        btn.scroll_into_view_if_needed(timeout=1500)
+                                        btn.click(timeout=5000)
+                                        self.logger.info(
+                                            f"Scan: clicked {kind} via {sel!r} "
+                                            f"(attempt {_attempt + 1})"
+                                        )
+                                        return True
+                                except Exception:
+                                    continue
+                        return False
+
+                    clicked = _try_click_apply(EASY_APPLY_SELECTORS, attempts=3, kind="Easy Apply")
+                    if not clicked:
+                        clicked = _try_click_apply(self._GENERAL_APPLY_BUTTON_SELECTORS, attempts=2, kind="generic Apply")
                         if clicked:
-                            break
+                            click_label = "generic Apply"
 
                     if not clicked:
                         # Save a screenshot so we can diagnose what the page shows
@@ -3036,194 +3195,265 @@ class TelegramJobSession:
                         except Exception as _se:
                             self.logger.debug(f"Scan: screenshot failed: {_se}")
                         self.logger.info(
-                            "Scan: Easy Apply button not found after 3 attempts – "
+                            "Scan: no Easy Apply/generic Apply button found after retries – "
                             f"page url: {page.url}"
                         )
                         return []
 
-                    # Wait for the Easy Apply modal to appear
-                    try:
-                        page.wait_for_selector(
-                            ".artdeco-modal, .jobs-easy-apply-modal",
-                            timeout=8000
+                    page.wait_for_timeout(2500)
+                    post_click_page_count = len(ctx.pages)
+                    post_click_url = page.url
+                    scan_flow_type = self._classify_apply_flow_transition(
+                        pre_click_url=pre_click_url,
+                        post_click_url=post_click_url,
+                        pre_page_count=pre_click_page_count,
+                        post_page_count=post_click_page_count,
+                    )
+
+                    scan_page = page
+                    if scan_flow_type == "external_popup":
+                        try:
+                            scan_page = ctx.pages[-1]
+                            scan_page.bring_to_front()
+                        except Exception:
+                            scan_page = page
+                        self.logger.info(
+                            f"Scan: external application detected in popup/new tab ({scan_page.url})"
                         )
-                        self.logger.info("Scan: Easy Apply modal opened")
+                    elif scan_flow_type == "external_same_tab":
+                        self.logger.info(
+                            f"Scan: external application detected in same tab ({scan_page.url})"
+                        )
+                    elif scan_flow_type == "easy_apply" and click_label != "Easy Apply":
+                        self.logger.info(
+                            f"Scan: generic Apply click remained on LinkedIn job page ({scan_page.url}); treating as modal-style flow"
+                        )
+
+                    try:
+                        scan_page.wait_for_load_state("domcontentloaded", timeout=10000)
                     except Exception:
-                        # Modal selector not found; give a flat extra wait before scanning
-                        self.logger.warning("Scan: modal selector not detected, proceeding with flat wait")
-                        page.wait_for_timeout(2000)
+                        pass
+                    try:
+                        scan_page.wait_for_load_state("networkidle", timeout=7000)
+                    except Exception:
+                        pass
+
+                    # Wait for the Easy Apply modal to appear
+                    if scan_flow_type == "easy_apply":
+                        try:
+                            scan_page.wait_for_selector(
+                                ".artdeco-modal, .jobs-easy-apply-modal",
+                                timeout=8000
+                            )
+                            self.logger.info("Scan: Easy Apply modal opened")
+                        except Exception:
+                            # Modal selector not found; give a flat extra wait before scanning
+                            self.logger.warning("Scan: modal selector not detected, proceeding with flat wait")
+                            scan_page.wait_for_timeout(2000)
 
                     # Resolve modal container for scoped operations
                     modal_scope = None
-                    for _modal_sel in [".artdeco-modal", ".jobs-easy-apply-modal"]:
-                        try:
-                            _m = page.locator(_modal_sel).first
-                            if _m.count() > 0 and _m.is_visible(timeout=500):
-                                modal_scope = _m
-                                self.logger.info(f"Scan: modal scope resolved via {_modal_sel!r}")
-                                break
-                        except Exception:
-                            pass
-                    if modal_scope is None:
-                        self.logger.warning("Scan: modal scope not resolved, falling back to full page")
-
-                    # Walk wizard steps (scan only – never submit)
-                    max_steps = 20
-                    last_page_signature = ""
-                    stagnant_signature_streak = 0
-                    for _step in range(max_steps):
-                        page.wait_for_timeout(800)
-                        before = len(discovered)
-                        _scan_step(page, scope=modal_scope)
-                        _prefill_required_for_scan(page, scope=modal_scope)
-                        new_fields = len(discovered) - before
-                        self.logger.info(f"Scan step {_step}: +{new_fields} new field(s), total={len(discovered)}")
-
-                        page_signature = _current_page_signature(page, scope=modal_scope)
-
-                        if page_signature and page_signature == last_page_signature:
-                            stagnant_signature_streak += 1
-                        else:
-                            stagnant_signature_streak = 0
-                        if page_signature:
-                            last_page_signature = page_signature
-
-                        if new_fields == 0 and stagnant_signature_streak >= 1:
-                            self.logger.info(
-                                f"Scan step {_step}: visible form content unchanged after advance; stopping wizard walk"
-                            )
-                            break
-
-                        # Find advance button (language-agnostic) — scoped to modal
-                        advance = None
-                        advance_root = modal_scope if modal_scope is not None else page
-                        for sel in [
-                            ".artdeco-modal button.artdeco-button--primary",
-                            ".jobs-easy-apply-modal button.artdeco-button--primary",
-                            "button.artdeco-button--primary",
-                            "button[aria-label*='Continue to next step']",
-                            "button[aria-label*='Next']",
-                            "button[aria-label*='next']",
-                            "button[aria-label*='Review']",
-                            "button[aria-label*='review']",
-                            "button[aria-label*='التالي']",
-                            "button[aria-label*='الاستمرار']",
-                            "button[aria-label*='الخطوة التالية']",
-                            "button[aria-label*='مراجعة']",
-                            "button:has-text('Next')",
-                            "button:has-text('Continue')",
-                            "button:has-text('Review')",
-                        ]:
+                    if scan_flow_type == "easy_apply":
+                        for _modal_sel in [".artdeco-modal", ".jobs-easy-apply-modal"]:
                             try:
-                                b = advance_root.locator(sel).last
-                                if b.count() > 0 and b.is_visible(timeout=1000) and b.is_enabled(timeout=1000):
-                                    advance = b
+                                _m = scan_page.locator(_modal_sel).first
+                                if _m.count() > 0 and _m.is_visible(timeout=500):
+                                    modal_scope = _m
+                                    self.logger.info(f"Scan: modal scope resolved via {_modal_sel!r}")
                                     break
                             except Exception:
-                                continue
-
-                        if advance is None:
-                            # Robust fallback: inspect visible modal buttons directly.
-                            blocked_primary = None
-                            try:
-                                modal_buttons = advance_root.locator("button")
-                                for idx in range(modal_buttons.count()):
-                                    try:
-                                        b = modal_buttons.nth(idx)
-                                        if not b.is_visible(timeout=300):
-                                            continue
-                                        cls = (b.get_attribute("class", timeout=300) or "").lower()
-                                        if "artdeco-button--primary" not in cls:
-                                            continue
-                                        if "dismiss" in cls:
-                                            continue
-                                        if b.is_enabled(timeout=300):
-                                            advance = b
-                                            break
-                                        blocked_primary = b
-                                    except Exception:
-                                        continue
-                            except Exception:
                                 pass
+                        if modal_scope is None:
+                            self.logger.warning("Scan: modal scope not resolved, falling back to full page")
 
-                            if advance is None and blocked_primary is not None:
-                                try:
-                                    _prefill_required_for_scan(page, scope=modal_scope)
-                                    page.wait_for_timeout(500)
-                                    if blocked_primary.is_enabled(timeout=500):
-                                        advance = blocked_primary
-                                except Exception:
-                                    pass
+                    # Walk wizard steps (scan only – never submit)
+                    easy_apply_step = -1
+                    max_steps = 0
+                    if scan_flow_type != "easy_apply":
+                        before = len(discovered)
+                        scan_roots: List[Any] = [scan_page]
+                        try:
+                            for frame in scan_page.frames:
+                                if frame == scan_page.main_frame:
+                                    continue
+                                frame_url = (frame.url or "").lower()
+                                if not frame_url or frame_url == "about:blank":
+                                    continue
+                                if (
+                                    "apply-with-linkedin" in frame_url
+                                    or "talentwidgets" in frame_url
+                                    or "jobs.eu.lever.co" in frame_url
+                                    or "lever.co" in frame_url
+                                ):
+                                    scan_roots.append(frame)
+                        except Exception:
+                            pass
 
-                        if advance is None:
-                            # Fallback: pick any visible primary modal action button,
-                            # then retry prefill in case required custom controls are still empty.
+                        for root in scan_roots:
+                            _scan_step(root, scope=None)
+
+                        new_fields = len(discovered) - before
+                        self.logger.info(
+                            f"Scan external flow: +{new_fields} new field(s), total={len(discovered)}"
+                        )
+                    else:
+                        max_steps = 20
+                        last_page_signature = ""
+                        stagnant_signature_streak = 0
+                        for _step in range(max_steps):
+                            easy_apply_step = _step
+                            scan_page.wait_for_timeout(800)
+                            before = len(discovered)
+                            _scan_step(scan_page, scope=modal_scope)
+                            _prefill_required_for_scan(scan_page, scope=modal_scope)
+                            new_fields = len(discovered) - before
+                            self.logger.info(f"Scan step {_step}: +{new_fields} new field(s), total={len(discovered)}")
+
+                            page_signature = _current_page_signature(scan_page, scope=modal_scope)
+
+                            if page_signature and page_signature == last_page_signature:
+                                stagnant_signature_streak += 1
+                            else:
+                                stagnant_signature_streak = 0
+                            if page_signature:
+                                last_page_signature = page_signature
+
+                            if new_fields == 0 and stagnant_signature_streak >= 1:
+                                self.logger.info(
+                                    f"Scan step {_step}: visible form content unchanged after advance; stopping wizard walk"
+                                )
+                                break
+
+                            # Find advance button (language-agnostic) — scoped to modal
+                            advance = None
+                            advance_root = modal_scope if modal_scope is not None else scan_page
                             for sel in [
+                                ".artdeco-modal button.artdeco-button--primary",
+                                ".jobs-easy-apply-modal button.artdeco-button--primary",
                                 "button.artdeco-button--primary",
+                                "button[aria-label*='Continue to next step']",
+                                "button[aria-label*='Next']",
+                                "button[aria-label*='next']",
+                                "button[aria-label*='Review']",
+                                "button[aria-label*='review']",
+                                "button[aria-label*='التالي']",
+                                "button[aria-label*='الاستمرار']",
+                                "button[aria-label*='الخطوة التالية']",
+                                "button[aria-label*='مراجعة']",
+                                "button:has-text('Next')",
+                                "button:has-text('Continue')",
+                                "button:has-text('Review')",
                             ]:
                                 try:
-                                    cand = advance_root.locator(sel).last
-                                    if cand.count() > 0 and cand.is_visible(timeout=500):
-                                        if cand.is_enabled(timeout=500):
-                                            advance = cand
-                                            break
-                                        _prefill_required_for_scan(page, scope=modal_scope)
-                                        page.wait_for_timeout(500)
-                                        if cand.is_enabled(timeout=500):
-                                            advance = cand
-                                            break
+                                    b = advance_root.locator(sel).last
+                                    if b.count() > 0 and b.is_visible(timeout=1000) and b.is_enabled(timeout=1000):
+                                        advance = b
+                                        break
                                 except Exception:
                                     continue
 
-                        if advance is None:
-                            try:
-                                visible_candidates = advance_root.locator(
-                                    "button:has(span.artdeco-button__text)"
-                                ).filter(has_text=re.compile(r"next|continue|review|التالي|الاستمرار|مراجعة", re.IGNORECASE))
-                                self.logger.info(
-                                    f"Scan step {_step}: no enabled advance button found; "
-                                    f"visible candidates={visible_candidates.count()}"
-                                )
-                            except Exception:
-                                pass
-                            try:
-                                dbg_buttons = advance_root.locator("button")
-                                dbg_count = dbg_buttons.count()
-                                self.logger.info(f"Scan step {_step}: debug button count={dbg_count}")
-                                for i in range(min(dbg_count, 8)):
+                            if advance is None:
+                                # Robust fallback: inspect visible modal buttons directly.
+                                blocked_primary = None
+                                try:
+                                    modal_buttons = advance_root.locator("button")
+                                    for idx in range(modal_buttons.count()):
+                                        try:
+                                            b = modal_buttons.nth(idx)
+                                            if not b.is_visible(timeout=300):
+                                                continue
+                                            cls = (b.get_attribute("class", timeout=300) or "").lower()
+                                            if "artdeco-button--primary" not in cls:
+                                                continue
+                                            if "dismiss" in cls:
+                                                continue
+                                            if b.is_enabled(timeout=300):
+                                                advance = b
+                                                break
+                                            blocked_primary = b
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    pass
+
+                                if advance is None and blocked_primary is not None:
                                     try:
-                                        b = dbg_buttons.nth(i)
-                                        t = (b.inner_text(timeout=200) or "").strip()
-                                        a = (b.get_attribute("aria-label", timeout=200) or "").strip()
-                                        c = (b.get_attribute("class", timeout=200) or "").strip()
-                                        v = b.is_visible(timeout=200)
-                                        e = b.is_enabled(timeout=200)
-                                        self.logger.info(
-                                            f"Scan step {_step}: btn[{i}] visible={v} enabled={e} text={t!r} aria={a!r} class={c!r}"
-                                        )
+                                        _prefill_required_for_scan(scan_page, scope=modal_scope)
+                                        scan_page.wait_for_timeout(500)
+                                        if blocked_primary.is_enabled(timeout=500):
+                                            advance = blocked_primary
+                                    except Exception:
+                                        pass
+
+                            if advance is None:
+                                # Fallback: pick any visible primary modal action button,
+                                # then retry prefill in case required custom controls are still empty.
+                                for sel in [
+                                    "button.artdeco-button--primary",
+                                ]:
+                                    try:
+                                        cand = advance_root.locator(sel).last
+                                        if cand.count() > 0 and cand.is_visible(timeout=500):
+                                            if cand.is_enabled(timeout=500):
+                                                advance = cand
+                                                break
+                                            _prefill_required_for_scan(scan_page, scope=modal_scope)
+                                            scan_page.wait_for_timeout(500)
+                                            if cand.is_enabled(timeout=500):
+                                                advance = cand
+                                                break
                                     except Exception:
                                         continue
-                            except Exception:
-                                pass
-                            self.logger.info(f"Scan step {_step}: no advance button found, stopping wizard walk")
-                            break
-                        btn_text = (advance.inner_text(timeout=2000) or "").strip().lower()
-                        try:
-                            btn_aria = (advance.get_attribute("aria-label", timeout=1000) or "").strip().lower()
-                        except Exception:
-                            btn_aria = ""
-                        self.logger.info(f"Scan step {_step}: advance button text={btn_text!r}")
-                        self.logger.info(f"Scan step {_step}: advance button aria={btn_aria!r}")
-                        # Stop before Submit – we don't want to actually submit
-                        if _is_submit_action(btn_text, btn_aria):
-                            break
-                        if not _is_advance_action(btn_text, btn_aria):
-                            self.logger.info(f"Scan step {_step}: action is not an advance action, stopping")
-                            break
-                        advance.click(timeout=5000)
-                        page.wait_for_timeout(1200)
 
-                    if len(discovered) > 0 and _step == max_steps - 1:
+                            if advance is None:
+                                try:
+                                    visible_candidates = advance_root.locator(
+                                        "button:has(span.artdeco-button__text)"
+                                    ).filter(has_text=re.compile(r"next|continue|review|التالي|الاستمرار|مراجعة", re.IGNORECASE))
+                                    self.logger.info(
+                                        f"Scan step {_step}: no enabled advance button found; "
+                                        f"visible candidates={visible_candidates.count()}"
+                                    )
+                                except Exception:
+                                    pass
+                                try:
+                                    dbg_buttons = advance_root.locator("button")
+                                    dbg_count = dbg_buttons.count()
+                                    self.logger.info(f"Scan step {_step}: debug button count={dbg_count}")
+                                    for i in range(min(dbg_count, 8)):
+                                        try:
+                                            b = dbg_buttons.nth(i)
+                                            t = (b.inner_text(timeout=200) or "").strip()
+                                            a = (b.get_attribute("aria-label", timeout=200) or "").strip()
+                                            c = (b.get_attribute("class", timeout=200) or "").strip()
+                                            v = b.is_visible(timeout=200)
+                                            e = b.is_enabled(timeout=200)
+                                            self.logger.info(
+                                                f"Scan step {_step}: btn[{i}] visible={v} enabled={e} text={t!r} aria={a!r} class={c!r}"
+                                            )
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    pass
+                                self.logger.info(f"Scan step {_step}: no advance button found, stopping wizard walk")
+                                break
+                            btn_text = (advance.inner_text(timeout=2000) or "").strip().lower()
+                            try:
+                                btn_aria = (advance.get_attribute("aria-label", timeout=1000) or "").strip().lower()
+                            except Exception:
+                                btn_aria = ""
+                            self.logger.info(f"Scan step {_step}: advance button text={btn_text!r}")
+                            self.logger.info(f"Scan step {_step}: advance button aria={btn_aria!r}")
+                            # Stop before Submit – we don't want to actually submit
+                            if _is_submit_action(btn_text, btn_aria):
+                                break
+                            if not _is_advance_action(btn_text, btn_aria):
+                                self.logger.info(f"Scan step {_step}: action is not an advance action, stopping")
+                                break
+                            advance.click(timeout=5000)
+                            scan_page.wait_for_timeout(1200)
+
+                    if scan_flow_type == "easy_apply" and len(discovered) > 0 and easy_apply_step == max_steps - 1:
                         self.logger.info(
                             f"Scan: reached max_steps={max_steps}; traversal stopped with {len(discovered)} discovered fields"
                         )
@@ -3237,7 +3467,7 @@ class TelegramJobSession:
                         ".artdeco-modal__dismiss",
                     ]:
                         try:
-                            d = page.locator(dismiss_sel).first
+                            d = scan_page.locator(dismiss_sel).first
                             if d.count() > 0 and d.is_visible(timeout=1000):
                                 d.click(timeout=3000)
                                 break
@@ -4357,24 +4587,35 @@ class TelegramJobSession:
                         self.logger.warning("Easy Apply: wait_for_selector timed out for apply button")
 
                     clicked = False
-                    for attempt in range(3):
-                        if attempt > 0:
-                            page.wait_for_timeout(1500)
-                        for sel in easy_apply_selectors:
-                            try:
-                                btn = page.locator(sel).first
-                                if btn.count() > 0 and btn.is_visible(timeout=3000):
-                                    btn.click(timeout=5000)
-                                    clicked = True
-                                    self.logger.info(
-                                        f"Easy Apply: clicked Easy Apply button via {sel!r} "
-                                        f"(attempt {attempt + 1})"
-                                    )
-                                    break
-                            except Exception:
-                                continue
+                    click_label = "Easy Apply"
+                    pre_click_page_count = len(ctx.pages)
+                    pre_click_url = page.url
+
+                    def _try_click_apply(selectors: List[str], attempts: int = 3) -> bool:
+                        for attempt in range(attempts):
+                            if attempt > 0:
+                                page.wait_for_timeout(1500)
+                            for sel in selectors:
+                                try:
+                                    btn = page.locator(sel).first
+                                    if btn.count() > 0 and btn.is_visible(timeout=3000):
+                                        btn.scroll_into_view_if_needed(timeout=1500)
+                                        btn.click(timeout=5000)
+                                        self.logger.info(
+                                            f"Easy Apply: clicked Easy Apply button via {sel!r} "
+                                            f"(attempt {attempt + 1})"
+                                        )
+                                        return True
+                                except Exception:
+                                    continue
+                        return False
+
+                    clicked = _try_click_apply(easy_apply_selectors, attempts=3)
+                    if not clicked:
+                        clicked = _try_click_apply(self._GENERAL_APPLY_BUTTON_SELECTORS, attempts=2)
                         if clicked:
-                            break
+                            click_label = "generic Apply"
+                            self.logger.info("Easy Apply: clicked generic Apply fallback entry")
 
                     if not clicked:
                         # Check if it's an external application
@@ -4385,6 +4626,54 @@ class TelegramJobSession:
                                 "Please apply manually via the job URL."
                             )
                         return False, "Could not find the Easy Apply button. The page may have changed or you may need to log in."
+
+                    page.wait_for_timeout(2500)
+
+                    flow_type = self._classify_apply_flow_transition(
+                        pre_click_url=pre_click_url,
+                        post_click_url=page.url,
+                        pre_page_count=pre_click_page_count,
+                        post_page_count=len(ctx.pages),
+                    )
+                    if flow_type == "linkedin_internal_navigation":
+                        self.logger.warning(
+                            f"Easy Apply: apply click navigated to another LinkedIn jobs page ({page.url}); "
+                            "retrying with strict top-card selectors"
+                        )
+                        try:
+                            page.go_back(wait_until="domcontentloaded", timeout=15000)
+                            page.wait_for_timeout(1500)
+                            pre_click_page_count = len(ctx.pages)
+                            pre_click_url = page.url
+                            clicked = _try_click_apply(self._STRICT_TOP_CARD_APPLY_SELECTORS, attempts=2)
+                            if not clicked:
+                                return False, "Could not click top-card Easy Apply entry after LinkedIn navigation fallback."
+                            page.wait_for_timeout(2500)
+                            flow_type = self._classify_apply_flow_transition(
+                                pre_click_url=pre_click_url,
+                                post_click_url=page.url,
+                                pre_page_count=pre_click_page_count,
+                                post_page_count=len(ctx.pages),
+                            )
+                        except Exception as retry_exc:
+                            return False, f"Easy Apply fallback retry failed: {retry_exc}"
+
+                    if flow_type != "easy_apply":
+                        if flow_type == "external_popup" and len(ctx.pages) > pre_click_page_count:
+                            try:
+                                ext_page = ctx.pages[-1]
+                                ext_url = ext_page.url
+                            except Exception:
+                                ext_url = page.url
+                        else:
+                            ext_url = page.url
+                        self.logger.info(f"Easy Apply: external application flow detected ({ext_url})")
+                        return False, (
+                            "Detected external application flow (Apply opens a separate application page). "
+                            "Current submit/preview automation supports LinkedIn Easy Apply wizard only."
+                        )
+                    if click_label != "Easy Apply":
+                        self.logger.info("Easy Apply: continuing with modal fill path after generic Apply fallback")
 
                     page.wait_for_timeout(2000)  # modal animation
 

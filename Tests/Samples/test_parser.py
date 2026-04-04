@@ -1,15 +1,36 @@
-import subprocess
-import sys
-from pathlib import Path
+import os
+import json
 
+def run_parser_test(sample_file):
+    print(f"--- RUNNING TEST ON: {sample_file} ---")
+    
+    # 1. Load your Identity & Requirements
+    with open('MY_CONTEXT.md', 'r') as f:
+        context = f.read()
+    with open('JOB_HUNTER_PERSONA.md', 'r') as f:
+        persona = f.read()
+        
+    # 2. Load the Sample Job Description
+    with open(sample_file, 'r', encoding='utf-8') as f:
+        job_description = f.read()
 
-def main() -> int:
-    project_root = Path(__file__).resolve().parents[2]
-    script_path = project_root / "test_parser.py"
-    command = [sys.executable, str(script_path), "Tests/Samples/positive_match.txt", "--expect-match", "auto"]
-    result = subprocess.run(command, cwd=str(project_root), check=False)
-    return result.returncode
+    # 3. Construct the "Test Prompt"
+    test_prompt = f"""
+    SYSTEM INSTRUCTIONS:
+    {persona}
 
+    USER CONTEXT (Ariel Samin):
+    {context}
+
+    JOB DESCRIPTION TO ANALYZE:
+    {job_description}
+    """
+    
+    # 4. Output for your Paid Copilot
+    print("\n[INSTRUCTION] Copy the text below and paste it into your Copilot Chat to verify the logic:")
+    print("-" * 30)
+    print(test_prompt)
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Test the positive case first
+    run_parser_test('Tests/Samples/positive_match.txt')
