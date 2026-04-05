@@ -244,6 +244,26 @@ def extract_standard_external_fields_from_html(html_text: str) -> List[Dict[str,
     }
 
     seen: set = set()
+
+    # Lever AWLI control: LinkedIn profile import button (not a URL text input).
+    awli_label = re.search(
+        r"<div[^>]*class=['\"][^'\"]*application-label[^'\"]*['\"][^>]*>\s*LinkedIn\s+profile\s*</div>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    awli_button = re.search(
+        r"<button[^>]*\btype=['\"]button['\"][^>]*>.*?Apply\s+with\s+LinkedIn",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if awli_label and awli_button:
+        fields.append({
+            "label": "LinkedIn profile",
+            "type": "action",
+            "options": ["Share", "Skip"],
+        })
+        seen.add(("linkedin profile", "action"))
+
     for tag in input_pattern.findall(text):
         attrs = {m.group(1).lower(): (m.group(3) or "") for m in attr_pattern.finditer(tag)}
         input_name = (attrs.get("name") or "").strip()
@@ -2001,7 +2021,6 @@ class TelegramJobSession:
     # applications skip them automatically.
     FIXED_FIELDS: List[Tuple[str, str]] = [
         ("cv_path",           "📎 CV file path (full path to your PDF CV, e.g. C:\\Users\\you\\CV.pdf):"),
-        ("cover_letter_path", "📝 Cover letter file path (full path, or reply 'none' if not available):"),
         ("full_name",         "✍️ Full name:"),
         ("email",             "📧 Email:"),
         ("phone",             "📱 Phone number:"),
@@ -2011,7 +2030,6 @@ class TelegramJobSession:
 
     FIXED_FIELD_SUMMARY_LABELS: Dict[str, str] = {
         "cv_path": "CV file path",
-        "cover_letter_path": "Cover letter file path",
         "full_name": "Full name",
         "email": "Email",
         "phone": "Phone number",
@@ -3131,7 +3149,7 @@ class TelegramJobSession:
                     if not label:
                         continue
                     ftype = (extra.get("type") or "text").strip().lower()
-                    if ftype not in {"text", "select", "radio", "checkbox", "textarea", "file", "email", "tel"}:
+                    if ftype not in {"text", "select", "radio", "checkbox", "textarea", "file", "email", "tel", "action"}:
                         ftype = "text"
                     options = extra.get("options") or []
                     pk = _profile_key_for(label)
@@ -3146,7 +3164,7 @@ class TelegramJobSession:
                     if not label:
                         continue
                     ftype = (extra.get("type") or "text").strip().lower()
-                    if ftype not in {"text", "select", "radio", "checkbox", "textarea", "file", "email", "tel"}:
+                    if ftype not in {"text", "select", "radio", "checkbox", "textarea", "file", "email", "tel", "action"}:
                         ftype = "text"
                     options = extra.get("options") or []
                     pk = _profile_key_for(label)
@@ -3996,7 +4014,6 @@ class TelegramJobSession:
         self._apply_field_labels = dict(self.FIXED_FIELD_SUMMARY_LABELS)
         self._apply_field_types = {
             "cv_path": "file",
-            "cover_letter_path": "file",
             "full_name": "text",
             "email": "email",
             "phone": "tel",
@@ -4004,6 +4021,7 @@ class TelegramJobSession:
             "linkedin": "url",
         }
         fixed_keys = {k for k, _ in self.FIXED_FIELDS}
+        seen_semantic_groups: set = set()
 
         def _contains_arabic(text: str) -> bool:
             return bool(re.search(r"[\u0600-\u06FF]", text or ""))
@@ -4028,11 +4046,17 @@ class TelegramJobSession:
         for key, label, ftype in scanned:
             if key in fixed_keys:
                 continue  # already covered
+            options = self._apply_field_options.get(key, [])
+            semantic_group = self._apply_label_group_key(label, ftype, options)
+            if semantic_group and semantic_group in seen_semantic_groups:
+                continue
+            if semantic_group:
+                seen_semantic_groups.add(semantic_group)
+
             self._apply_field_types[key] = ftype
             clean_label = self._canonicalize_apply_label(label) or label or key
             self._apply_field_labels[key] = clean_label
             # Build a prompt from the label and field type
-            options = self._apply_field_options.get(key, [])
             if not options and ftype in {"radio", "checkbox"} and key in {
                 "relocate_bangkok",
                 "agoda_relationship",
@@ -4046,8 +4070,11 @@ class TelegramJobSession:
             if not options and ftype == "checkbox":
                 options = ["Yes", "No"]
                 self._apply_field_options[key] = options
+            if not options and ftype == "action":
+                options = ["Share", "Skip"]
+                self._apply_field_options[key] = options
             options_block = ""
-            if options and ftype in {"radio", "checkbox", "select"}:
+            if options and ftype in {"radio", "checkbox", "select", "action"}:
                 max_options_to_show = 25
                 shown_options = options[:max_options_to_show]
                 options_lines = [f"   {index + 1}) {html.escape(opt)}" for index, opt in enumerate(shown_options)]
@@ -4063,7 +4090,12 @@ class TelegramJobSession:
             elif ftype == "select":
                 prompt = f"🔽 {display_label} (type your choice):{options_block}{arabic_note}"
             elif ftype == "file":
-                continue  # file inputs are handled by FIXED_FIELDS
+                if key == "cover_letter_path":
+                    prompt = "📝 Cover letter file path (full path, or reply 'none' if not available):"
+                else:
+                    prompt = f"📎 {display_label} file path (full path):"
+            elif ftype == "action":
+                prompt = f"🔘 {display_label} (type your choice):{options_block}{arabic_note}"
             else:
                 prompt = f"✏️ {display_label}:{arabic_note}"
             result.append((key, prompt))
@@ -4093,7 +4125,7 @@ class TelegramJobSession:
 
         ftype = self._apply_field_types.get(field_key, "")
         options = self._apply_field_options.get(field_key, [])
-        if options and ftype in {"radio", "checkbox", "select"}:
+        if options and ftype in {"radio", "checkbox", "select", "action"}:
             if answer.isdigit():
                 idx = int(answer) - 1
                 if 0 <= idx < len(options):
@@ -4670,7 +4702,11 @@ class TelegramJobSession:
 
         old_key_by_canonical: Dict[str, str] = {}
         for key, _prompt in old_fields:
-            canonical = self._canonicalize_apply_label(old_labels.get(key, ""))
+            canonical = self._apply_label_group_key(
+                old_labels.get(key, ""),
+                self._apply_field_types.get(key, ""),
+                self._apply_field_options.get(key, []),
+            )
             if canonical and canonical not in old_key_by_canonical:
                 old_key_by_canonical[canonical] = key
 
@@ -4706,7 +4742,11 @@ class TelegramJobSession:
         # Prefer existing keys for equivalent labels so previously collected answers stay mapped.
         for scanned_key, scanned_prompt in rescanned_fields:
             scanned_label = rescanned_labels.get(scanned_key, "")
-            canonical = self._canonicalize_apply_label(scanned_label)
+            canonical = self._apply_label_group_key(
+                scanned_label,
+                self._apply_field_types.get(scanned_key, ""),
+                self._apply_field_options.get(scanned_key, []),
+            )
             target_key = old_key_by_canonical.get(canonical, scanned_key) if canonical else scanned_key
 
             if canonical and canonical in seen_canonical:
@@ -4723,7 +4763,11 @@ class TelegramJobSession:
         # Keep any already-answered old field that is not represented in the rescanned set.
         for old_key, old_prompt in old_fields:
             old_label = old_labels.get(old_key, "")
-            canonical = self._canonicalize_apply_label(old_label)
+            canonical = self._apply_label_group_key(
+                old_label,
+                self._apply_field_types.get(old_key, ""),
+                self._apply_field_options.get(old_key, []),
+            )
             if canonical and canonical in seen_canonical:
                 continue
             if old_answers.get(old_key):
@@ -4743,7 +4787,11 @@ class TelegramJobSession:
         # Transfer answers by key and by equivalent canonical label.
         canonical_answer_map: Dict[str, str] = {}
         for old_key, value in old_answers.items():
-            canonical = self._canonicalize_apply_label(old_labels.get(old_key, ""))
+            canonical = self._apply_label_group_key(
+                old_labels.get(old_key, ""),
+                self._apply_field_types.get(old_key, ""),
+                self._apply_field_options.get(old_key, []),
+            )
             if canonical and value:
                 canonical_answer_map[canonical] = value
 
@@ -4754,7 +4802,11 @@ class TelegramJobSession:
                 new_answers[field_key] = old_answers[field_key]
                 continue
             # Priority 2: answer transferable via canonical label equivalence.
-            canonical = self._canonicalize_apply_label(self._apply_field_labels.get(field_key, ""))
+            canonical = self._apply_label_group_key(
+                self._apply_field_labels.get(field_key, ""),
+                self._apply_field_types.get(field_key, ""),
+                self._apply_field_options.get(field_key, []),
+            )
             if canonical and canonical_answer_map.get(canonical):
                 new_answers[field_key] = canonical_answer_map[canonical]
                 continue
@@ -4767,13 +4819,25 @@ class TelegramJobSession:
 
         # Preserve asked-state for equivalent labels to avoid re-asking duplicates.
         asked_canonical = {
-            self._canonicalize_apply_label(old_labels.get(key, ""))
+            self._apply_label_group_key(
+                old_labels.get(key, ""),
+                self._apply_field_types.get(key, ""),
+                self._apply_field_options.get(key, []),
+            )
             for key in old_asked
-            if self._canonicalize_apply_label(old_labels.get(key, ""))
+            if self._apply_label_group_key(
+                old_labels.get(key, ""),
+                self._apply_field_types.get(key, ""),
+                self._apply_field_options.get(key, []),
+            )
         }
         self._apply_asked_field_keys = []
         for field_key, _prompt in self._apply_form_fields:
-            canonical = self._canonicalize_apply_label(self._apply_field_labels.get(field_key, ""))
+            canonical = self._apply_label_group_key(
+                self._apply_field_labels.get(field_key, ""),
+                self._apply_field_types.get(field_key, ""),
+                self._apply_field_options.get(field_key, []),
+            )
             if canonical and canonical in asked_canonical:
                 self._apply_asked_field_keys.append(field_key)
 
@@ -4825,6 +4889,32 @@ class TelegramJobSession:
 
         return normalize_form_label(text)
 
+    def _apply_label_group_key(self, label: str, ftype: str = "", options: Optional[List[str]] = None) -> str:
+        """Normalize labels into semantic groups so equivalent prompts collapse."""
+        base = (self._canonicalize_apply_label(label) or "").lower().strip()
+        if not base:
+            return ""
+
+        # Reduce low-signal suffix noise that appears in one of duplicated variants.
+        base = re.sub(r"\bprivacy\s+policy\b", "", base, flags=re.IGNORECASE)
+        base = re.sub(r"[^a-z0-9\s]", " ", base)
+        base = re.sub(r"\s+", " ", base).strip()
+
+        if "family member" in base and "mobileye" in base:
+            return "group__mobileye_family_member"
+        if "mobileye" in base and "contact me" in base and "future job opportunities" in base:
+            return "group__mobileye_marketing_consent"
+        if "what is your gender" in base:
+            return "group__gender_optional"
+
+        option_values = [normalize_form_label(opt or "").lower() for opt in (options or [])]
+        option_values = [opt for opt in option_values if opt]
+        options_sig = "|".join(sorted(dict.fromkeys(option_values)))
+        type_sig = (ftype or "").strip().lower()
+        if options_sig:
+            return f"group__{base}__{type_sig}__{options_sig}"
+        return f"group__{base}__{type_sig}"
+
     def _legacy_custom_key_from_label(self, label: str) -> str:
         """Backward-compatible key format used before collision-resistant keys."""
         normalized = normalize_form_label(label or "")
@@ -4862,7 +4952,11 @@ class TelegramJobSession:
                 label = prompt.split(" ", 1)[1].rstrip(":") if " " in prompt else prompt.rstrip(":")
                 label = label.split(" (", 1)[0].strip()
             display_value = value or "(not provided)"
-            canonical = self._canonicalize_apply_label(label) or label.lower().strip()
+            canonical = self._apply_label_group_key(
+                label,
+                self._apply_field_types.get(field_key, ""),
+                self._apply_field_options.get(field_key, []),
+            ) or label.lower().strip()
 
             if canonical not in deduped_entries:
                 dedup_order.append(canonical)
@@ -5808,13 +5902,14 @@ class TelegramJobSession:
 # Maps compiled regex patterns of LinkedIn field labels → saved profile keys.
 # Order matters: first match wins.
 TelegramJobSession.LABEL_TO_PROFILE_KEY = [
+    (re.compile(r"resume|\bcv\b|curriculum vitae", re.I), "cv_path"),
     (re.compile(r"first.?name",                 re.I), "full_name"),
     (re.compile(r"last.?name",                  re.I), "full_name"),
     (re.compile(r"full.?name|your name",        re.I), "full_name"),
     (re.compile(r"email",                       re.I), "email"),
     (re.compile(r"\bphone\b|\bmobile(?!ye)\b", re.I), "phone"),
     (re.compile(r"city|location|address",       re.I), "location"),
-    (re.compile(r"linkedin",                    re.I), "linkedin"),
+    (re.compile(r"linkedin\s*(profile\s*)?url|url\s*(for\s*)?linkedin", re.I), "linkedin"),
     (re.compile(r"github",                      re.I), "github"),
     (re.compile(r"website|portfolio|personal.?site", re.I), "website"),
     (re.compile(r"year.*experience|experience.*year|years of exp", re.I), "experience_years"),

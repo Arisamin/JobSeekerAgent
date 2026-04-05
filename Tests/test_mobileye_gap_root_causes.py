@@ -220,6 +220,52 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         label_blob = " | ".join(str(item.get("label", "")) for item in consent).lower()
         self.assertIn("mobileye can contact me", label_blob)
 
+    def test_build_fields_dedupes_mobileye_family_member_variants(self):
+        session = self._make_session()
+        session._apply_field_options = {
+            "custom__family_long": [
+                "I don't have any family member working at Mobileye",
+                "I have a family member working at Mobileye",
+            ],
+            "custom__family_short": [
+                "I don't have any family member working at Mobileye",
+                "I have a family member working at Mobileye",
+            ],
+        }
+        scanned = [
+            (
+                "custom__family_long",
+                "We kindly request that you make us aware if a family member of yours is currently employed by Mobileye.",
+                "radio",
+            ),
+            ("custom__family_short", "Family member working at Mobileye", "radio"),
+        ]
+        fields = session._build_apply_form_fields(scanned)
+        custom_keys = [key for key, _ in fields if key.startswith("custom__")]
+        self.assertEqual(custom_keys, ["custom__family_long"])
+
+    def test_build_fields_dedupes_marketing_consent_privacy_suffix_variant(self):
+        session = self._make_session()
+        session._apply_field_options = {
+            "custom__consent_a": ["Yes", "No"],
+            "custom__consent_b": ["Yes", "No"],
+        }
+        scanned = [
+            (
+                "custom__consent_a",
+                "Yes, Mobileye can contact me about future job opportunities for up to 3 years Privacy policy",
+                "checkbox",
+            ),
+            (
+                "custom__consent_b",
+                "Yes, Mobileye can contact me about future job opportunities for up to 3 years",
+                "checkbox",
+            ),
+        ]
+        fields = session._build_apply_form_fields(scanned)
+        custom_keys = [key for key, _ in fields if key.startswith("custom__")]
+        self.assertEqual(custom_keys, ["custom__consent_a"])
+
 
 if __name__ == "__main__":
     unittest.main()

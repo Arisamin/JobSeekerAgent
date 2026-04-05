@@ -47,7 +47,7 @@ class TestMobileyeSavedHtmlSummary(unittest.TestCase):
             if not clean_label:
                 return
             clean_type = (field_type or "text").strip().lower()
-            if clean_type not in {"text", "email", "tel", "textarea", "radio", "checkbox", "select", "file"}:
+            if clean_type not in {"text", "email", "tel", "textarea", "radio", "checkbox", "select", "file", "action"}:
                 clean_type = "text"
             pk = _profile_key_for(clean_label)
             key = pk if pk else session._custom_key_from_label(clean_label)
@@ -109,29 +109,56 @@ class TestMobileyeSavedHtmlSummary(unittest.TestCase):
         session = self._make_session()
         scanned = self._extract_scanned_fields_via_runtime_helpers(session, html_text)
 
+        # LinkedIn profile in this artifact is an import button control, not a free-text question.
+        self.assertRegex(html_text, r"<div class=\"application-label\">\s*LinkedIn\s+profile\s*</div>")
+        self.assertRegex(html_text, r"<button[^>]*type=\"button\"[^>]*>")
+        self.assertIn("Apply with LinkedIn", html_text)
+
         # Build options map exactly like runtime scanner does.
         session._apply_field_options = {k: list(opts) for k, _l, _t, opts in scanned if opts}
 
-        # Ensure LinkedIn import button is not treated as askable question.
-        labels = [label.lower() for _k, label, _t, _o in scanned]
-        self.assertNotIn("linkedin profile", labels)
+        expected_fields = {
+            "LinkedIn profile": ("action", ("Share", "Skip")),
+            "Resume / CV": ("file", ()),
+            "Full name": ("text", ()),
+            "Email": ("email", ()),
+            "Phone": ("text", ()),
+            "Current location": ("text", ()),
+            "Current company": ("text", ()),
+            "LinkedIn URL": ("text", ()),
+            "GitHub URL": ("text", ()),
+            "Add a cover letter or anything else you want to share.": ("text", ()),
+            "Family member working at Mobileye": (
+                "select",
+                (
+                    "I don't have any family member working at Mobileye",
+                    "I have a family member working at Mobileye",
+                ),
+            ),
+            "What is your gender? (optional)": (
+                "select",
+                ("Male", "Female", "Non-binary", "Prefer not to say"),
+            ),
+            "The position is located in Jerusalem and requires on-site work four days per week. We offer shuttle services from the Tel Aviv, Shfela, and Sharon areas. Are you ok with commuting to Jerusalem?": (
+                "radio",
+                ("Yes", "No, position isn't relevant for me"),
+            ),
+            "Yes, Mobileye can contact me about future job opportunities for up to 3 years": (
+                "checkbox",
+                ("Yes", "No"),
+            ),
+        }
 
-        required_labels = [
-            "Resume / CV",
-            "Full name",
-            "Email",
-            "Phone",
-            "Current location",
-            "LinkedIn URL",
-            "GitHub URL",
-            "Add a cover letter or anything else you want to share.",
-            "Family member working at Mobileye",
-            "What is your gender? (optional)",
-            "The position is located in Jerusalem and requires on-site work four days per week. We offer shuttle services from the Tel Aviv, Shfela, and Sharon areas. Are you ok with commuting to Jerusalem?",
-            "Yes, Mobileye can contact me about future job opportunities for up to 3 years",
-        ]
-        for label in required_labels:
-            self.assertIn(label.lower(), labels)
+        extracted_fields = {}
+        for _key, label, field_type, options in scanned:
+            extracted_fields[label] = (field_type, tuple(options or ()))
+
+        # Strict saved-artifact contract: label + type + options must match expected set.
+        self.assertEqual(extracted_fields, expected_fields)
+
+        labels = [label for _k, label, _t, _o in scanned]
+        self.assertIn("LinkedIn profile", labels)
+        self.assertIn("LinkedIn URL", labels)
 
         scanned_triplets = [(k, l, t) for k, l, t, _o in scanned]
         session._apply_form_fields = session._build_apply_form_fields(scanned_triplets)
@@ -183,6 +210,7 @@ class TestMobileyeSavedHtmlSummary(unittest.TestCase):
         print("=== END SUMMARY ===\n")
 
         self.assertIn("Application Summary", summary_text)
+        self.assertIn("LinkedIn profile", summary_text)
         self.assertIn("Family member working at Mobileye", summary_text)
         self.assertIn("Add a cover letter or anything else you want to share.", summary_text)
         self.assertIn("Yes, Mobileye can contact me", summary_text)

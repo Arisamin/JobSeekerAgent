@@ -180,7 +180,6 @@ class TestProfileCachePrefillFixed(unittest.TestCase):
         """If _saved_profile has all FIXED_FIELDS, none of them should need to be asked."""
         profile = {
             "cv_path": "/tmp/cv.pdf",
-            "cover_letter_path": "",
             "full_name": "Aba Guba",
             "email": "aba@example.com",
             "phone": "0556745678",
@@ -212,7 +211,6 @@ class TestProfileCachePrefillFixed(unittest.TestCase):
         """_first_missing_apply_field_idx() must skip fields that are already answered."""
         session = _make_session(saved_profile={
             "cv_path": "/tmp/cv.pdf",
-            "cover_letter_path": "",
             "full_name": "Aba Guba",
             "email": "aba@example.com",
             "phone": "0556745678",
@@ -228,11 +226,9 @@ class TestProfileCachePrefillFixed(unittest.TestCase):
                     session._apply_answers[field_key] = saved
 
             idx = session._first_missing_apply_field_idx()
-            # cv_path, full_name, email, phone, location, linkedin are all non-empty in cache
-            # and are transferred to _apply_answers.  cover_letter_path is an empty string
-            # in the saved profile, so it is NOT transferred (empty values are excluded),
-            # making it the first unanswered field at index 1.
-            self.assertEqual(idx, 1)  # index 1 is cover_letter_path (not in cache / empty)
+            # All fixed fields are present and non-empty in cache, so no unanswered
+            # fixed question should remain.
+            self.assertEqual(idx, len(session._apply_form_fields))
         finally:
             _cleanup(session)
 
