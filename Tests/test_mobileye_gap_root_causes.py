@@ -62,6 +62,22 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertTrue(agent_engine.is_section_heading_label("Privacy policy"))
         self.assertFalse(agent_engine.is_section_heading_label("LinkedIn profile URL"))
 
+    def test_linkedin_share_disclaimer_fragment_is_not_a_question_label(self):
+        self.assertTrue(agent_engine.is_disclaimer_label("shared. Learn more"))
+        self.assertTrue(agent_engine.is_linkedin_share_disclaimer_label("shared. Learn more"))
+
+    def test_extract_question_label_prefers_linkedin_profile_over_share_disclaimer_fragment(self):
+        block = """
+        LinkedIn profile
+        Your full LinkedIn profile will be
+        shared. Learn more
+        """
+        label = agent_engine.extract_question_label_from_block_text(block)
+        self.assertEqual(label, "LinkedIn profile")
+
+    def test_linkedin_profile_share_blurb_is_disclaimer_label(self):
+        self.assertTrue(agent_engine.is_disclaimer_label("Your full LinkedIn profile will be shared."))
+
     def test_disclaimer_and_option_lines_do_not_override_real_question(self):
         block = """
         This question is asked for the purpose of ensuring inclusivity and diversity. Your response is optional and will not affect the evaluation of your application
@@ -265,6 +281,20 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         fields = session._build_apply_form_fields(scanned)
         custom_keys = [key for key, _ in fields if key.startswith("custom__")]
         self.assertEqual(custom_keys, ["custom__consent_a"])
+
+    def test_build_fields_skips_linkedin_share_disclaimer_text_question(self):
+        session = self._make_session()
+        scanned = [
+            ("custom__linkedin_blurb", "Your full LinkedIn profile will be", "text"),
+            ("custom__linkedin_action", "LinkedIn profile", "action"),
+        ]
+        session._apply_field_options = {
+            "custom__linkedin_action": ["Share", "Skip"],
+        }
+        fields = session._build_apply_form_fields(scanned)
+        keys = [key for key, _ in fields]
+        self.assertNotIn("custom__linkedin_blurb", keys)
+        self.assertIn("custom__linkedin_action", keys)
 
 
 if __name__ == "__main__":

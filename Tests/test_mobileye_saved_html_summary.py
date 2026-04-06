@@ -101,6 +101,19 @@ class TestMobileyeSavedHtmlSummary(unittest.TestCase):
 
         return scanned
 
+    def _print_numbered_question_inventory(self, heading, rows):
+        print(f"\n=== {heading} ===")
+        for idx, (label, field_type, options) in enumerate(rows, 1):
+            opts = list(options or [])
+            if opts:
+                options_text = " | ".join(opts)
+            else:
+                options_text = "(none)"
+            print(f"Q{idx}. text={label}")
+            print(f"    type={field_type}")
+            print(f"    options={options_text}")
+        print(f"=== END {heading} ===\n")
+
     def test_saved_html_scanner_summary_matches_expected_mobileye_questions(self):
         html_path = Path(__file__).resolve().parents[1] / "Selected HTMLs" / "Mobileye - Senior Software Engineer & Tech Lead [Application].html"
         self.assertTrue(html_path.exists(), f"Missing artifact: {html_path}")
@@ -149,9 +162,24 @@ class TestMobileyeSavedHtmlSummary(unittest.TestCase):
             ),
         }
 
+        expected_rows = [
+            (label, field_type, list(options))
+            for label, (field_type, options) in expected_fields.items()
+        ]
+        self._print_numbered_question_inventory(
+            "MOBILEYE SAVED-HTML EXPECTED QUESTION SET",
+            expected_rows,
+        )
+
         extracted_fields = {}
         for _key, label, field_type, options in scanned:
             extracted_fields[label] = (field_type, tuple(options or ()))
+
+        discovered_rows = [(label, field_type, options) for _k, label, field_type, options in scanned]
+        self._print_numbered_question_inventory(
+            "MOBILEYE SAVED-HTML DISCOVERED QUESTION SET (RUNTIME LOGIC)",
+            discovered_rows,
+        )
 
         # Strict saved-artifact contract: label + type + options must match expected set.
         self.assertEqual(extracted_fields, expected_fields)
@@ -159,6 +187,8 @@ class TestMobileyeSavedHtmlSummary(unittest.TestCase):
         labels = [label for _k, label, _t, _o in scanned]
         self.assertIn("LinkedIn profile", labels)
         self.assertIn("LinkedIn URL", labels)
+        self.assertNotIn("shared. Learn more", labels)
+        self.assertNotIn("Your full LinkedIn profile will be", labels)
 
         scanned_triplets = [(k, l, t) for k, l, t, _o in scanned]
         session._apply_form_fields = session._build_apply_form_fields(scanned_triplets)

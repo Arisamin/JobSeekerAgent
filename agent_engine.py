@@ -111,8 +111,26 @@ def is_disclaimer_label(value: str) -> bool:
         "ensuring inclusivity and diversity",
         "response is optional",
         "will not affect the evaluation",
+        "your full linkedin profile will be",
     )
-    return any(marker in text for marker in markers)
+    if any(marker in text for marker in markers):
+        return True
+    return is_linkedin_share_disclaimer_label(text)
+
+
+def is_linkedin_share_disclaimer_label(value: str) -> bool:
+    """Return True for AWLI disclaimer fragments that should never become questions."""
+    text = normalize_form_label(value or "").lower()
+    if not text:
+        return False
+
+    if "linkedin" in text and "profile" in text and ("shared" in text or "learn more" in text):
+        return True
+    if re.search(r"\bshared\b.*\blearn more\b|\blearn more\b.*\bshared\b", text):
+        return True
+    if text in {"learn more", "shared learn more", "shared. learn more"}:
+        return True
+    return False
 
 
 def choose_card_template_question_label(card_title: str, field_text: str) -> str:
@@ -2699,11 +2717,14 @@ class TelegramJobSession:
             return bool(re.search(r"[\u0600-\u06FF]", text or ""))
 
         def _add(key: str, label: str, ftype: str, options: Optional[List[str]] = None) -> None:
+            clean_label = normalize_form_label(label or "")
+            if is_linkedin_share_disclaimer_label(clean_label):
+                return
             _merge_options(key, options or [])
             if key in seen_keys:
                 return
             seen_keys.add(key)
-            discovered.append((key, label, ftype))
+            discovered.append((key, clean_label or label, ftype))
 
         def _disambiguate_generic_key(key: str, label: str, source_hint: str) -> str:
             if not key.startswith("custom__"):
@@ -4046,6 +4067,8 @@ class TelegramJobSession:
         for key, label, ftype in scanned:
             if key in fixed_keys:
                 continue  # already covered
+            if is_disclaimer_label(label):
+                continue
             options = self._apply_field_options.get(key, [])
             semantic_group = self._apply_label_group_key(label, ftype, options)
             if semantic_group and semantic_group in seen_semantic_groups:
