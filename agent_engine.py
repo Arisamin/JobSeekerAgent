@@ -10,8 +10,9 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass, field
@@ -2282,6 +2283,10 @@ class TelegramJobSession:
         self._apply_field_options: Dict[str, List[str]] = {}
         self._apply_field_types: Dict[str, str] = {}
         self._return_state_after_apply: str = self.STATE_INTRO
+        self._prefill_launch_server: Optional[ThreadingHTTPServer] = None
+        self._prefill_launch_thread: Optional[threading.Thread] = None
+        self._prefill_launch_port: int = 0
+        self._prefill_launch_payloads: Dict[str, Dict[str, Any]] = {}
         # Allow callers (e.g. test runners) to override the profile path via an
         # environment variable so that automated test runs never write to the
         # production telegram_profile.json.
@@ -2413,6 +2418,7 @@ class TelegramJobSession:
         import urllib.request
         import mimetypes
         import uuid
+
         boundary = uuid.uuid4().hex
         CRLF = b"\r\n"
 
@@ -2447,6 +2453,115 @@ class TelegramJobSession:
                 pass
         except Exception as exc:
             self.logger.warning(f"Telegram sendDocument failed: {exc}")
+
+    def _ensure_prefill_launch_server(self) -> Optional[str]:
+        if self._prefill_launch_server is not None and self._prefill_launch_port > 0:
+            return f"http://127.0.0.1:{self._prefill_launch_port}"
+
+        session = self
+
+        class PrefillHandler(BaseHTTPRequestHandler):
+            def _send(self, status_code: int, body: str) -> None:
+                data = body.encode("utf-8")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self) -> None:
+                parsed = urlparse(self.path)
+                if parsed.path != "/launch-prefill":
+                    self._send(404, "<h3>Not found</h3>")
+                    return
+
+                token = (parse_qs(parsed.query).get("token") or [""])[0].strip()
+                payload = session._prefill_launch_payloads.get(token)
+                if not payload:
+                    self._send(410, "<h3>This launch link is invalid or expired.</h3>")
+                    return
+
+                if payload.get("used"):
+                    self._send(200, "<h3>This prefill link was already used.</h3>")
+                    return
+
+                payload["used"] = True
+                threading.Thread(
+                    target=session._launch_prefilled_form,
+                    args=(payload,),
+                    daemon=True,
+                ).start()
+                self._send(
+                    200,
+                    "".join(
+                        [
+                            "<h3>Launching prefilled application form...</h3>",
+                            "<p>You can close this tab after the browser opens.</p>",
+                        ]
+                    ),
+                )
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        server_obj: Optional[ThreadingHTTPServer] = None
+        selected_port = 0
+        for candidate in range(8785, 8800):
+            try:
+                server_obj = ThreadingHTTPServer(("127.0.0.1", candidate), PrefillHandler)
+                selected_port = candidate
+                break
+            except OSError:
+                continue
+
+        if server_obj is None:
+            self.logger.warning("Prefill launch server could not bind to ports 8785-8799")
+            return None
+
+        self._prefill_launch_server = server_obj
+        self._prefill_launch_port = selected_port
+        self._prefill_launch_thread = threading.Thread(target=server_obj.serve_forever, daemon=True)
+        self._prefill_launch_thread.start()
+        self.logger.info(f"Prefill launch server started on http://127.0.0.1:{selected_port}")
+        return f"http://127.0.0.1:{selected_port}"
+
+    def _register_prefill_launch(self, job_url: str, answers: Dict[str, str], title: str, company: str) -> Optional[str]:
+        base_url = self._ensure_prefill_launch_server()
+        if not base_url:
+            return None
+
+        token_src = f"{time.time_ns()}|{job_url}|{title}|{company}|{random.random()}"
+        token = hashlib.sha1(token_src.encode("utf-8")).hexdigest()[:24]
+        self._prefill_launch_payloads[token] = {
+            "token": token,
+            "job_url": job_url,
+            "answers": dict(answers),
+            "title": title,
+            "company": company,
+            "used": False,
+        }
+        return f"{base_url}/launch-prefill?{urlencode({'token': token})}"
+
+    def _launch_prefilled_form(self, payload: Dict[str, Any]) -> None:
+        try:
+            job_url = str(payload.get("job_url") or "").strip()
+            answers = dict(payload.get("answers") or {})
+            title = str(payload.get("title") or "?")
+            company = str(payload.get("company") or "?")
+            self.logger.info(f"Prefill launch requested for {title} @ {company}")
+            success, message = self._do_linkedin_easy_apply(
+                job_url,
+                answers,
+                submit_application=False,
+                allow_external_prefill=True,
+                force_headed=True,
+            )
+            if success:
+                self.logger.info(f"Prefill launch succeeded for {title} @ {company}: {message}")
+            else:
+                self.logger.warning(f"Prefill launch failed for {title} @ {company}: {message}")
+        except Exception as exc:
+            self.logger.warning(f"Prefill launch crashed: {exc}")
 
     def _send_photo(self, filename: str, content: bytes, caption: str = "") -> None:
         """Send an image via Telegram Bot API sendPhoto."""
@@ -5160,12 +5275,27 @@ class TelegramJobSession:
                 "so the summary can be incomplete. Use <b>Preview</b> to validate against the live form."
             )
 
+        prefill_launch_note = ""
+        launch_url = self._register_prefill_launch(
+            job_url=url,
+            answers=self._apply_answers,
+            title=title,
+            company=company,
+        )
+        if launch_url:
+            prefill_launch_note = (
+                "\n\n🔗 <b>Quick Launch:</b> "
+                f"<a href=\"{html.escape(launch_url)}\">Open prefilled browser form</a>"
+                " (supports Easy Apply and External Apply; submit manually on the page)."
+            )
+
         self._send(
             f"📋 <b>Application Summary</b>\n"
             f"Role: <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>\n"
             f"🔗 {html.escape(url)}\n\n"
             + submission_section
             + verification_note
+            + prefill_launch_note
             + "\n\n"
             "Reply <b>Preview</b> to fill and stop on the final review page (no submit), "
             "or <b>Submit</b> to fill &amp; submit the form on LinkedIn, "
@@ -5251,6 +5381,32 @@ class TelegramJobSession:
                 "Reply <b>Next</b> to continue | <b>Done</b> to finish | <b>db</b> to browse DB"
             )
         else:
+            if "Detected external application flow" in (message or ""):
+                launch_success, launch_message = self._do_linkedin_easy_apply(
+                    job_url,
+                    answers,
+                    submit_application=False,
+                    allow_external_prefill=True,
+                    force_headed=True,
+                )
+                if launch_success:
+                    self._send(
+                        "⚠️ <b>This role uses an external apply flow.</b>\n"
+                        "I opened a browser and prefilled the external form with your summary answers.\n"
+                        "Please review and submit manually on the external page.\n\n"
+                        "Status has <b>not</b> been changed."
+                    )
+                    return True
+
+                self._send(
+                    f"❌ <b>Submission failed.</b>\n"
+                    f"{html.escape(message)}\n\n"
+                    f"I also tried launching a prefilled external form but failed: {html.escape(launch_message)}\n"
+                    "Status has <b>not</b> been changed.\n"
+                    "Reply <b>Cancel</b> to abort this application | <b>Submit</b> to retry."
+                )
+                return True
+
             self._send(
                 f"❌ <b>Submission failed.</b>\n"
                 f"{html.escape(message)}\n\n"
@@ -5277,6 +5433,8 @@ class TelegramJobSession:
         job_url: str,
         answers: Dict[str, str],
         submit_application: bool = True,
+        allow_external_prefill: bool = False,
+        force_headed: bool = False,
     ) -> Tuple[bool, str]:
         """
         Open the LinkedIn job page, click Easy Apply, and fill out the modal form
@@ -5299,7 +5457,7 @@ class TelegramJobSession:
         local_app_data = _os.environ.get("LOCALAPPDATA", "")
         primary_profile = _os.path.join(local_app_data, "Google", "Chrome", "User Data") if local_app_data else ""
         fallback_profile = str(Path(__file__).parent / ".playwright_profile")
-        easy_apply_headless = self._easy_apply_run_mode == "normal"
+        easy_apply_headless = False if force_headed else (self._easy_apply_run_mode == "normal")
 
         cv_path = answers.get("cv_path", "").strip()
         browser_seen: Dict[str, Tuple[str, str]] = {}
@@ -5426,15 +5584,23 @@ class TelegramJobSession:
                             return False, f"Easy Apply fallback retry failed: {retry_exc}"
 
                     if flow_type != "easy_apply":
+                        external_page = page
                         if flow_type == "external_popup" and len(ctx.pages) > pre_click_page_count:
                             try:
-                                ext_page = ctx.pages[-1]
-                                ext_url = ext_page.url
+                                external_page = ctx.pages[-1]
+                                ext_url = external_page.url
                             except Exception:
                                 ext_url = page.url
                         else:
                             ext_url = page.url
                         self.logger.info(f"Easy Apply: external application flow detected ({ext_url})")
+                        if allow_external_prefill and not submit_application:
+                            return self._prefill_external_application_form(
+                                page=external_page,
+                                answers=answers,
+                                cv_path=cv_path,
+                                keep_browser_open=not easy_apply_headless,
+                            )
                         return False, (
                             "Detected external application flow (Apply opens a separate application page). "
                             "Current submit/preview automation supports LinkedIn Easy Apply wizard only."
@@ -5566,6 +5732,73 @@ class TelegramJobSession:
         except Exception as exc:
             self.logger.error(f"Easy Apply unexpected error: {exc}")
             return False, f"Unexpected error during submission: {exc}"
+
+    def _prefill_external_application_form(
+        self,
+        page: Any,
+        answers: Dict[str, str],
+        cv_path: str,
+        keep_browser_open: bool,
+    ) -> Tuple[bool, str]:
+        """Best-effort prefill for external application pages (e.g. Lever)."""
+        try:
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=12000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+
+            roots: List[Any] = [page]
+            try:
+                for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
+                    frame_url = (frame.url or "").lower()
+                    if not frame_url or frame_url == "about:blank":
+                        continue
+                    if (
+                        "apply-with-linkedin" in frame_url
+                        or "talentwidgets" in frame_url
+                        or "jobs.eu.lever.co" in frame_url
+                        or "lever.co" in frame_url
+                    ):
+                        roots.append(frame)
+            except Exception:
+                pass
+
+            for _ in range(4):
+                for root in roots:
+                    self._fill_easy_apply_modal(root, answers, cv_path)
+                    try:
+                        root.evaluate(
+                            "window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight))"
+                        )
+                    except Exception:
+                        pass
+                try:
+                    page.wait_for_timeout(450)
+                except Exception:
+                    pass
+
+            if keep_browser_open:
+                try:
+                    while not page.is_closed():
+                        page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+            return True, "External application form opened and prefilled. Review and submit manually."
+        except Exception as exc:
+            self.logger.warning(f"External prefill failed: {exc}")
+            return False, f"External prefill failed: {exc}"
 
     def _capture_visible_modal_field_snapshot(self, page: Any) -> List[Tuple[str, str]]:
         """Capture visible modal field labels/values for a browser-confirmed preview snapshot."""
