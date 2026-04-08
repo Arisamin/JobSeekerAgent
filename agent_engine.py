@@ -567,9 +567,14 @@ class JobRecord:
     location: str
     url: str
     description: str
+    apply_mode: str = "Unknown"
 
 
 class ProcessedJobsDB:
+    APPLY_MODE_EASY = "Easy Apply"
+    APPLY_MODE_EXTERNAL = "External Apply"
+    APPLY_MODE_UNKNOWN = "Unknown"
+
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path)
@@ -584,10 +589,24 @@ class ProcessedJobsDB:
                 url TEXT,
                 status TEXT DEFAULT 'Discovered',
                 created_at TEXT NOT NULL,
-                last_updated TEXT NOT NULL
+                last_updated TEXT NOT NULL,
+                recommendation TEXT DEFAULT 'Unknown',
+                apply_mode TEXT DEFAULT 'Unknown'
             )
             """
         )
+        self.conn.commit()
+        # Migrate existing records if needed (add new columns)
+        try:
+            self.conn.execute("ALTER TABLE processed_jobs ADD COLUMN recommendation TEXT DEFAULT 'Unknown'")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            self.conn.execute("ALTER TABLE processed_jobs ADD COLUMN apply_mode TEXT DEFAULT 'Unknown'")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self.conn.commit()
         # Migrate existing records if needed (add new columns)
         try:
@@ -601,23 +620,67 @@ class ProcessedJobsDB:
         except sqlite3.OperationalError:
             pass  # Column already exists
 
+    @classmethod
+    def normalize_apply_mode(cls, raw_mode: Optional[str]) -> str:
+        mode = (raw_mode or "").strip().lower()
+        if mode == "easy apply":
+            return cls.APPLY_MODE_EASY
+        if mode == "external apply":
+            return cls.APPLY_MODE_EXTERNAL
+        return cls.APPLY_MODE_UNKNOWN
+
     def seen(self, job_key: str) -> bool:
         cursor = self.conn.execute("SELECT 1 FROM processed_jobs WHERE job_key = ? LIMIT 1", (job_key,))
         return cursor.fetchone() is not None
 
     def add(self, job: JobRecord) -> None:
+        apply_mode = self.normalize_apply_mode(job.apply_mode)
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO processed_jobs (job_key, title, company, url, status, created_at, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO processed_jobs (job_key, title, company, url, status, recommendation, apply_mode, created_at, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job.job_key, job.title, job.company, job.url, "Discovered", datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
+            (
+                job.job_key,
+                job.title,
+                job.company,
+                job.url,
+                "Discovered",
+                "Unknown",
+                apply_mode,
+                datetime.now(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def upsert_job_metadata(self, job_key: str, recommendation: Optional[str] = None, apply_mode: Optional[str] = None) -> None:
+        updates: List[str] = []
+        values: List[Any] = []
+        if recommendation is not None:
+            updates.append("recommendation = ?")
+            values.append(recommendation)
+        if apply_mode is not None:
+            updates.append("apply_mode = ?")
+            values.append(self.normalize_apply_mode(apply_mode))
+        if not updates:
+            return
+
+        updates.append("last_updated = ?")
+        values.append(datetime.now(timezone.utc).isoformat())
+        values.append(job_key)
+
+        self.conn.execute(
+            f"UPDATE processed_jobs SET {', '.join(updates)} WHERE job_key = ?",
+            tuple(values),
         )
         self.conn.commit()
 
     def get_all_jobs(self) -> List[Dict]:
         """Retrieve all jobs from the database."""
-        cursor = self.conn.execute("SELECT id, job_key, title, company, url, status, created_at, last_updated FROM processed_jobs ORDER BY created_at DESC")
+        cursor = self.conn.execute(
+            "SELECT id, job_key, title, company, url, status, recommendation, apply_mode, created_at, last_updated FROM processed_jobs ORDER BY created_at DESC"
+        )
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
@@ -626,7 +689,7 @@ class ProcessedJobsDB:
             return []
         placeholders = ",".join("?" for _ in statuses)
         cursor = self.conn.execute(
-            f"SELECT id, job_key, title, company, url, status, created_at, last_updated FROM processed_jobs WHERE status IN ({placeholders}) ORDER BY last_updated DESC",
+            f"SELECT id, job_key, title, company, url, status, recommendation, apply_mode, created_at, last_updated FROM processed_jobs WHERE status IN ({placeholders}) ORDER BY last_updated DESC",
             tuple(statuses),
         )
         columns = [desc[0] for desc in cursor.description]
@@ -1177,8 +1240,8 @@ class ReportActionsServer:
             httpd.server_close()
 
 
-def run_easy_mode(args: argparse.Namespace, base_dir: Path) -> None:
-    print("\n🚀 Easy mode starting: scan jobs, then open update page...\n")
+def run_report_mode(args: argparse.Namespace, base_dir: Path) -> None:
+    print("\n🚀 Report mode starting: scan jobs, then open update page...\n")
 
     agent = LinkedInJobAgent(
         base_dir=base_dir,
@@ -1196,7 +1259,7 @@ def run_easy_mode(args: argparse.Namespace, base_dir: Path) -> None:
         print(f"⚠️ Scan ended with warning: {exc}")
         print("⚠️ Continuing to open latest report for status updates...")
 
-    print("\n✅ Scan finished. Opening update page in your browser...\n")
+    print("\n✅ Scan finished. Opening report page in your browser...\n")
     server = ReportActionsServer(
         base_dir=base_dir,
         host=args.report_host,
@@ -1427,6 +1490,39 @@ class LinkedInJobAgent:
             except Exception:
                 continue
 
+    def _detect_apply_mode(self, page: Any) -> str:
+        easy_selectors = [
+            "button:has-text('Easy Apply')",
+            "a:has-text('Easy Apply')",
+            "button[aria-label*='Easy Apply']",
+        ]
+        external_selectors = [
+            "button:has-text('Apply on company site')",
+            "a:has-text('Apply on company site')",
+            "button:has-text('Apply with LinkedIn')",
+            "a:has-text('Apply with LinkedIn')",
+            "button.jobs-apply-button",
+            "a.jobs-apply-button",
+            "button:has-text('Apply')",
+            "a:has-text('Apply')",
+        ]
+
+        for selector in easy_selectors:
+            try:
+                if page.locator(selector).count() > 0:
+                    return ProcessedJobsDB.APPLY_MODE_EASY
+            except Exception:
+                continue
+
+        for selector in external_selectors:
+            try:
+                if page.locator(selector).count() > 0:
+                    return ProcessedJobsDB.APPLY_MODE_EXTERNAL
+            except Exception:
+                continue
+
+        return ProcessedJobsDB.APPLY_MODE_UNKNOWN
+
     @staticmethod
     def _canonicalize_job_url(url: str) -> str:
         cleaned = (url or "").strip()
@@ -1511,10 +1607,27 @@ class LinkedInJobAgent:
         reject_count = sum(1 for entry in self.report_entries if entry["recommendation"] == "DO NOT APPLY")
 
         cards_html: List[str] = []
+        run_rows: List[str] = []
         for index, entry in enumerate(self.report_entries, start=1):
             rows_html = "".join(
                 f"<tr><td>{html.escape(metric)}</td><td>{html.escape(analysis)}</td><td>{html.escape(match)}</td></tr>"
                 for metric, analysis, match in entry["rows"]
+            )
+            apply_mode = ProcessedJobsDB.normalize_apply_mode(str(entry.get("apply_mode") or "Unknown"))
+            run_rows.append(
+                "".join(
+                    [
+                        "<tr>",
+                        f"<td>{index}</td>",
+                        f"<td>{html.escape(entry['title'])}</td>",
+                        f"<td>{html.escape(entry['company'])}</td>",
+                        f"<td>{html.escape(entry['location'] or 'N/A')}</td>",
+                        f"<td><a href='{html.escape(entry['url'])}' target='_blank'>{html.escape(entry['url'])}</a></td>",
+                        f"<td>{html.escape(apply_mode)}</td>",
+                        f"<td>{html.escape(entry['recommendation'])}</td>",
+                        "</tr>",
+                    ]
+                )
             )
             cards_html.append(
                 "".join(
@@ -1525,6 +1638,7 @@ class LinkedInJobAgent:
                         f"<p><strong>Location:</strong> {html.escape(entry['location'] or 'N/A')}</p>",
                         f"<p><strong>URL:</strong> <a href='{html.escape(entry['url'])}' target='_blank'>{html.escape(entry['url'])}</a></p>",
                         f"<p><strong>Recommendation:</strong> <span class='badge'>{html.escape(entry['recommendation'])}</span></p>",
+                        f"<p><strong>Apply Mode:</strong> {html.escape(apply_mode)}</p>",
                         "<table><thead><tr><th>Metric</th><th>Analysis</th><th>Match?</th></tr></thead>",
                         f"<tbody>{rows_html}</tbody></table>",
                         "<p class='approval'>Ariel, should I draft an application for this role? [Y/N]</p>",
@@ -1533,7 +1647,18 @@ class LinkedInJobAgent:
                 )
             )
 
-        run_results_content = "".join(cards_html) if cards_html else "<p>No jobs were extracted in this run.</p>"
+        run_results_table = (
+            "".join(
+                [
+                    "<table><thead><tr><th>#</th><th>Title</th><th>Company</th><th>Location</th><th>URL</th><th>Apply Mode</th><th>Recommendation</th></tr></thead>",
+                    f"<tbody>{''.join(run_rows)}</tbody></table>",
+                ]
+            )
+            if run_rows
+            else "<p>No jobs were extracted in this run.</p>"
+        )
+
+        run_results_content = "".join(cards_html) if cards_html else ""
 
         db_jobs = self.db.get_all_jobs()
         db_rows: List[str] = []
@@ -1544,6 +1669,8 @@ class LinkedInJobAgent:
                     for status in UserDBUpdateMode.STATUSES
                 ]
             )
+            apply_mode = ProcessedJobsDB.normalize_apply_mode(str(job.get("apply_mode") or "Unknown"))
+            recommendation = str(job.get("recommendation") or "Unknown")
             db_rows.append(
                 "".join(
                     [
@@ -1552,6 +1679,8 @@ class LinkedInJobAgent:
                         f"<td>{html.escape(job['title'] or 'N/A')}</td>",
                         f"<td>{html.escape(job['company'] or 'N/A')}</td>",
                         f"<td><a href='{html.escape(job['url'] or '')}' target='_blank'>{html.escape(job['url'] or '')}</a></td>",
+                        f"<td>{html.escape(apply_mode)}</td>",
+                        f"<td>{html.escape(recommendation)}</td>",
                         (
                             "<td>"
                             f"<select class='status-select' data-job-id='{job['id']}'>"
@@ -1572,7 +1701,7 @@ class LinkedInJobAgent:
                     "<button id='update-agent-btn' class='primary'>Update Agent</button>",
                     "<span id='apply-status-msg' class='muted'>Update Agent sends selected statuses to DB and opens DB update mode.</span>",
                     "</div>",
-                    "<table><thead><tr><th>ID</th><th>Title</th><th>Company</th><th>URL</th><th>Status</th><th>Last Updated</th></tr></thead>",
+                    "<table><thead><tr><th>ID</th><th>Title</th><th>Company</th><th>URL</th><th>Apply Mode</th><th>Recommendation</th><th>Status</th><th>Last Updated</th></tr></thead>",
                     f"<tbody>{''.join(db_rows)}</tbody></table>",
                 ]
             )
@@ -1631,6 +1760,8 @@ class LinkedInJobAgent:
                 f"<div class='param'><strong>Per Card Seconds</strong><br>{self.per_card_seconds}</div>",
                 "</div>",
                 "<h3 style='margin-top:14px'>Run Jobs</h3>",
+                run_results_table,
+                "<h3 style='margin-top:14px'>Run Job Details</h3>",
                 run_results_content,
                 "</div></details>",
                 "<details class='section'>",
@@ -1827,10 +1958,13 @@ class LinkedInJobAgent:
                     self.log_step("3.5", f"Skipping card {index + 1}: missing job URL")
                     continue
 
+                apply_mode = self._detect_apply_mode(page)
+
                 key_source = f"{title}|{company}|{job_url}"
                 job_key = hashlib.sha256(key_source.encode("utf-8")).hexdigest()
 
                 if self.db.seen(job_key):
+                    self.db.upsert_job_metadata(job_key=job_key, apply_mode=apply_mode)
                     self.log_step("3.3", f"Skipping already-processed job: {title} @ {company}")
                     continue
 
@@ -1841,6 +1975,7 @@ class LinkedInJobAgent:
                     location=location,
                     url=job_url,
                     description=description,
+                    apply_mode=apply_mode,
                 )
                 self.db.add(job)
                 jobs.append(job)
@@ -1894,8 +2029,14 @@ class LinkedInJobAgent:
                 "location": job.location,
                 "url": job.url,
                 "recommendation": recommendation,
+                "apply_mode": ProcessedJobsDB.normalize_apply_mode(job.apply_mode),
                 "rows": rows,
             }
+        )
+        self.db.upsert_job_metadata(
+            job_key=job.job_key,
+            recommendation=recommendation,
+            apply_mode=job.apply_mode,
         )
 
     def run(self) -> None:
@@ -4269,12 +4410,16 @@ class TelegramJobSession:
         company = html.escape(job.get("company") or "Unknown")
         url     = job.get("url") or ""
         status  = html.escape(job.get("status") or "Discovered")
+        raw_mode = str(job.get("apply_mode") or ProcessedJobsDB.APPLY_MODE_UNKNOWN)
+        apply_mode = ProcessedJobsDB.normalize_apply_mode(raw_mode)
+        apply_icon = "⚡" if apply_mode == ProcessedJobsDB.APPLY_MODE_EASY else "🌐" if apply_mode == ProcessedJobsDB.APPLY_MODE_EXTERNAL else "❔"
         jid     = job.get("id", "?")
         return (
             f"<b>Job {index}/{total}</b>  |  ID: <code>{jid}</code>\n"
             f"<b>{title}</b>\n"
             f"🏢 {company}\n"
             f"📌 Status: {status}\n"
+            f"{apply_icon} Apply Mode: {html.escape(apply_mode)}\n"
             f'🔗 <a href="{url}">{url}</a>\n\n'
             "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b>"
         )
@@ -4284,12 +4429,16 @@ class TelegramJobSession:
         company = html.escape(job.get("company") or "Unknown")
         url     = job.get("url") or ""
         status  = html.escape(job.get("status") or "")
+        raw_mode = str(job.get("apply_mode") or ProcessedJobsDB.APPLY_MODE_UNKNOWN)
+        apply_mode = ProcessedJobsDB.normalize_apply_mode(raw_mode)
+        apply_icon = "⚡" if apply_mode == ProcessedJobsDB.APPLY_MODE_EASY else "🌐" if apply_mode == ProcessedJobsDB.APPLY_MODE_EXTERNAL else "❔"
         jid     = job.get("id", "?")
         return (
             f"<b>[DB] Job {index}/{total}</b>  |  ID: <code>{jid}</code>\n"
             f"<b>{title}</b>\n"
             f"🏢 {company}\n"
             f"📌 Status: {status}\n"
+            f"{apply_icon} Apply Mode: {html.escape(apply_mode)}\n"
             f'🔗 <a href="{url}">{url}</a>\n\n'
             "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b>"
         )
@@ -6062,7 +6211,7 @@ def parse_args() -> argparse.Namespace:
         help="Do not auto-open browser when serving report",
     )
     parser.add_argument(
-        "--easy-mode",
+        "--report-mode",
         action="store_true",
         help="One-step mode: run scan once, then open report update page",
     )
@@ -6100,8 +6249,8 @@ def main() -> None:
     args = parse_args()
     base_dir = Path(__file__).resolve().parent
 
-    if args.easy_mode:
-        run_easy_mode(args=args, base_dir=base_dir)
+    if args.report_mode:
+        run_report_mode(args=args, base_dir=base_dir)
         return
 
     if args.run_skipped_maintenance:
