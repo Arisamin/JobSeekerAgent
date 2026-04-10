@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,49 @@ class TestReportModeParsing(unittest.TestCase):
         with patch.object(sys, "argv", ["agent_engine.py", "--easy-mode"]):
             with self.assertRaises(SystemExit):
                 agent_engine.parse_args()
+
+    def test_parse_args_accepts_reset_db(self):
+        with patch.object(sys, "argv", ["agent_engine.py", "--reset-db"]):
+            args = agent_engine.parse_args()
+        self.assertTrue(args.reset_db)
+
+
+class TestDbResetHelper(unittest.TestCase):
+    def test_reset_processed_jobs_db_removes_db_and_sidecars(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+        for name in ["processed_jobs.db", "processed_jobs.db-wal", "processed_jobs.db-shm"]:
+            (base / name).write_text("x", encoding="utf-8")
+
+        agent_engine.reset_processed_jobs_db(base)
+
+        self.assertFalse((base / "processed_jobs.db").exists())
+        self.assertFalse((base / "processed_jobs.db-wal").exists())
+        self.assertFalse((base / "processed_jobs.db-shm").exists())
+
+
+class TestReportActionsServerLatestReport(unittest.TestCase):
+    def test_latest_report_prefers_filename_timestamp_over_mtime(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+        reports = base / "Reports"
+        reports.mkdir(parents=True, exist_ok=True)
+
+        older = reports / "run_report_20260408_113529.html"
+        newer = reports / "run_report_20260411_000610.html"
+        older.write_text("older", encoding="utf-8")
+        newer.write_text("newer", encoding="utf-8")
+
+        # Simulate accidental touch of an older report file.
+        os.utime(older, None)
+
+        server = agent_engine.ReportActionsServer(base_dir=base, open_browser=False)
+        selected = server._latest_report_path()
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.name, "run_report_20260411_000610.html")
 
 
 class TestJobMetadataPersistence(unittest.TestCase):
@@ -182,6 +226,162 @@ class TestReportHtmlSectionsMetadata(unittest.TestCase):
         self.assertIn("External Apply", html_text)
         self.assertIn("B) Jobs in DB", html_text)
         self.assertIn("Recommendation", html_text)
+
+
+class _FakeLocatorItem:
+    def __init__(self, text: str = "", visible: bool = True):
+        self._text = text
+        self._visible = visible
+
+    def is_visible(self, timeout: int = 0):
+        return self._visible
+
+    def inner_text(self, timeout: int = 0):
+        return self._text
+
+
+class _FakeLocator:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def count(self):
+        return len(self._items)
+
+    def nth(self, idx: int):
+        return self._items[idx]
+
+
+class _FakePageForApplyMode:
+    def __init__(self, mapping):
+        self._mapping = mapping
+        self.context = None
+
+    def locator(self, selector: str):
+        return _FakeLocator(self._mapping.get(selector, []))
+
+
+class _FakeProbeContext:
+    def __init__(self, probe_page):
+        self._probe_page = probe_page
+
+    def new_page(self):
+        return self._probe_page
+
+
+class _FakeProbePage(_FakePageForApplyMode):
+    def set_default_timeout(self, timeout: int):
+        return None
+
+    def goto(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 0):
+        return None
+
+    def wait_for_timeout(self, ms: int):
+        return None
+
+    def close(self):
+        return None
+
+
+class TestApplyModeDetection(unittest.TestCase):
+    def _make_agent(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+        agent = agent_engine.LinkedInJobAgent(
+            base_dir=base,
+            max_jobs=1,
+            headless=True,
+            query="test",
+            user_data_dir=None,
+            max_run_seconds=60,
+            max_extract_seconds=30,
+            per_card_seconds=10,
+        )
+        self.addCleanup(agent.db.close)
+        for handler in list(agent.logger.handlers):
+            self.addCleanup(handler.close)
+        return agent
+
+    def test_detect_apply_mode_ignores_non_top_card_easy_apply_text(self):
+        agent = self._make_agent()
+        page = _FakePageForApplyMode(
+            {
+                "a:has-text('Easy Apply')": [_FakeLocatorItem("Easy Apply", True)],
+            }
+        )
+        mode = agent._detect_apply_mode(page)
+        self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN)
+
+    def test_detect_apply_mode_marks_easy_apply_when_top_card_easy_visible(self):
+        agent = self._make_agent()
+        page = _FakePageForApplyMode(
+            {
+                "[data-control-name*='jobdetails_topcard_inapply'] button": [_FakeLocatorItem("Easy Apply", True)],
+            }
+        )
+        mode = agent._detect_apply_mode(page)
+        self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_EASY)
+
+    def test_detect_apply_mode_marks_external_when_top_card_apply_visible(self):
+        agent = self._make_agent()
+        page = _FakePageForApplyMode(
+            {
+                ".jobs-details-top-card__job-actions button:has-text('Apply')": [_FakeLocatorItem("Apply", True)],
+            }
+        )
+        mode = agent._detect_apply_mode(page)
+        self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_EXTERNAL)
+
+    def test_detect_apply_mode_for_job_url_prefers_probe_page_mode(self):
+        agent = self._make_agent()
+
+        # Active page appears to contain generic Easy Apply artifacts.
+        active_page = _FakePageForApplyMode(
+            {
+                "[data-control-name*='jobdetails_topcard_inapply'] button": [_FakeLocatorItem("Easy Apply", True)],
+            }
+        )
+
+        # Probe page for the specific URL has no visible apply controls.
+        probe_page = _FakeProbePage({})
+        active_page.context = _FakeProbeContext(probe_page)
+
+        mode = agent._detect_apply_mode_for_job_url(active_page, "https://www.linkedin.com/jobs/view/4374291012/")
+        self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN)
+
+
+class TestAdaptiveJitter(unittest.TestCase):
+    def _make_agent(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+        agent = agent_engine.LinkedInJobAgent(
+            base_dir=base,
+            max_jobs=5,
+            headless=True,
+            query="test",
+            user_data_dir=None,
+            max_run_seconds=60,
+            max_extract_seconds=30,
+            per_card_seconds=10,
+        )
+        self.addCleanup(agent.db.close)
+        for handler in list(agent.logger.handlers):
+            self.addCleanup(handler.close)
+        return agent
+
+    def test_jitter_respects_max_delay_budget(self):
+        agent = self._make_agent()
+        with patch("agent_engine.random.uniform", return_value=0.35), patch("agent_engine.time.sleep") as sleep_mock:
+            agent.jitter("x", max_delay=0.5)
+        sleep_mock.assert_called_once()
+        self.assertLessEqual(float(sleep_mock.call_args[0][0]), 0.5)
+
+    def test_jitter_disable_flag_uses_short_delay(self):
+        agent = self._make_agent()
+        with patch.dict(os.environ, {"AGENT_DISABLE_JITTER": "1"}, clear=False), patch("agent_engine.time.sleep") as sleep_mock:
+            agent.jitter("x", max_delay=0.8)
+        sleep_mock.assert_called_once_with(0.2)
 
 
 if __name__ == "__main__":

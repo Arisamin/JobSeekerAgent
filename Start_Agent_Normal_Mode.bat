@@ -16,6 +16,9 @@ REM      .\Start_Agent_Normal_Mode.bat
 REM
 REM   2) Normal mode + more jobs:
 REM      .\Start_Agent_Normal_Mode.bat --max-jobs 8
+
+REM   2b) Force fresh run (reset DB before scan):
+REM      .\Start_Agent_Normal_Mode.bat --max-jobs 5 --headless --reset-db
 REM
 REM   3) Testing traversal mode:
 REM      .\Start_Agent_Normal_Mode.bat --easy-apply-run-mode testing

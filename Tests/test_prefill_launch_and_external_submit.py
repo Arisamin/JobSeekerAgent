@@ -87,7 +87,7 @@ class TestPrefillLaunchLink(unittest.TestCase):
 
 
 class TestExternalSubmitFallback(unittest.TestCase):
-    def test_submit_external_falls_back_to_prefilled_launch(self):
+    def test_submit_external_uses_single_attempt_with_external_prefill_enabled(self):
         session = _make_session()
         try:
             session._current_job = {
@@ -101,26 +101,53 @@ class TestExternalSubmitFallback(unittest.TestCase):
             with patch.object(
                 session,
                 "_do_linkedin_easy_apply",
-                side_effect=[
-                    (
-                        False,
-                        "Detected external application flow (Apply opens a separate application page). Current submit/preview automation supports LinkedIn Easy Apply wizard only.",
-                    ),
-                    (True, "External application form opened and prefilled. Review and submit manually."),
-                ],
+                return_value=(
+                    False,
+                    "External application form was prefilled, but automatic submit could not be confirmed. Please review and submit manually on the external page.",
+                ),
             ) as apply_mock:
                 keep_running = session._cmd_submit_apply()
 
             self.assertTrue(keep_running)
-            self.assertEqual(apply_mock.call_count, 2)
-            second_call = apply_mock.call_args_list[1]
-            self.assertEqual(second_call.kwargs["submit_application"], False)
-            self.assertEqual(second_call.kwargs["allow_external_prefill"], True)
-            self.assertEqual(second_call.kwargs["force_headed"], True)
+            self.assertEqual(apply_mock.call_count, 1)
+            call_kwargs = apply_mock.call_args.kwargs
+            self.assertEqual(call_kwargs["submit_application"], True)
+            self.assertEqual(call_kwargs["allow_external_prefill"], True)
+            self.assertEqual(call_kwargs["force_headed"], True)
 
             sent = "\n".join(session._sent_messages)
-            self.assertIn("external apply flow", sent.lower())
-            self.assertIn("prefilled", sent.lower())
+            self.assertIn("submit was not confirmed", sent.lower())
+            self.assertIn("status has <b>not</b> been changed", sent.lower())
+        finally:
+            _cleanup(session)
+
+
+class TestApplyAnswerResolution(unittest.TestCase):
+    def test_resolve_apply_answer_uses_machine_hints_for_location(self):
+        session = _make_session()
+        try:
+            answer = session._resolve_apply_answer(
+                "",
+                {
+                    "location": "Jerusalem, Israel",
+                },
+                hints=["candidate_location", "location"],
+            )
+            self.assertEqual(answer, "Jerusalem, Israel")
+        finally:
+            _cleanup(session)
+
+    def test_resolve_apply_answer_uses_machine_hints_for_linkedin(self):
+        session = _make_session()
+        try:
+            answer = session._resolve_apply_answer(
+                "",
+                {
+                    "linkedin": "https://www.linkedin.com/in/example",
+                },
+                hints=["urls[LinkedIn]"],
+            )
+            self.assertEqual(answer, "https://www.linkedin.com/in/example")
         finally:
             _cleanup(session)
 

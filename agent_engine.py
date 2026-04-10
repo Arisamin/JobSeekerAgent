@@ -1114,7 +1114,23 @@ class ReportActionsServer:
         reports_dir = self.base_dir / "Reports"
         if not reports_dir.exists():
             return None
-        report_files = sorted(reports_dir.glob("run_report_*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+        def _report_sort_key(path: Path) -> Tuple[int, float]:
+            # Prefer the timestamp embedded in run_report_YYYYMMDD_HHMMSS.html.
+            # This avoids selecting an old report whose mtime was touched later.
+            match = re.match(r"^run_report_(\d{8}_\d{6})\.html$", path.name)
+            if match:
+                stamp = match.group(1)
+                try:
+                    dt = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+                    return (1, dt.timestamp())
+                except Exception:
+                    pass
+            try:
+                return (0, path.stat().st_mtime)
+            except Exception:
+                return (0, 0.0)
+
+        report_files = sorted(reports_dir.glob("run_report_*.html"), key=_report_sort_key, reverse=True)
         return report_files[0] if report_files else None
 
     def _apply_updates(self, updates: List[Dict[str, Any]]) -> Tuple[bool, str, int]:
@@ -1408,11 +1424,17 @@ class LinkedInJobAgent:
     def log_step(self, step: str, message: str) -> None:
         self.logger.info(message, extra={"step": step})
 
-    def jitter(self, step: str) -> None:
+    def jitter(self, step: str, max_delay: Optional[float] = None) -> None:
         if os.getenv("AGENT_DISABLE_JITTER", "0") == "1":
             delay = 0.2
         else:
-            delay = random.uniform(5, 15)
+            low = 0.4
+            high = 1.2
+            if max_delay is not None:
+                safe_cap = max(0.2, float(max_delay))
+                high = min(high, safe_cap)
+                low = min(low, high)
+            delay = random.uniform(low, high)
         self.log_step(step, f"Jitter wait {delay:.1f}s")
         time.sleep(delay)
 
@@ -1492,37 +1514,135 @@ class LinkedInJobAgent:
                 continue
 
     def _detect_apply_mode(self, page: Any) -> str:
+        def _has_visible(selector: str, max_probe: int = 8) -> bool:
+            try:
+                locator = page.locator(selector)
+                count = min(locator.count(), max_probe)
+                for idx in range(count):
+                    try:
+                        if locator.nth(idx).is_visible(timeout=300):
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                return False
+            return False
+
+        # Restrict detection to the primary top-card action area. This avoids
+        # false positives from "Easy Apply" badges in similar-job sidebars.
         easy_selectors = [
-            "button:has-text('Easy Apply')",
-            "a:has-text('Easy Apply')",
-            "button[aria-label*='Easy Apply']",
+            "[data-control-name*='jobdetails_topcard_inapply'] button",
+            "[data-control-name*='jobdetails_topcard_inapply'] a",
+            ".jobs-apply-button--top-card",
+            "button.jobs-apply-button--top-card",
+            "a.jobs-apply-button--top-card",
+            ".jobs-details-top-card__job-actions button:has-text('Easy Apply')",
+            ".jobs-details-top-card__job-actions a:has-text('Easy Apply')",
+            ".jobs-details-top-card__job-actions button[aria-label*='Easy Apply']",
         ]
         external_selectors = [
-            "button:has-text('Apply on company site')",
-            "a:has-text('Apply on company site')",
-            "button:has-text('Apply with LinkedIn')",
-            "a:has-text('Apply with LinkedIn')",
-            "button.jobs-apply-button",
-            "a.jobs-apply-button",
-            "button:has-text('Apply')",
-            "a:has-text('Apply')",
+            ".jobs-details-top-card__job-actions button:has-text('Apply on company site')",
+            ".jobs-details-top-card__job-actions a:has-text('Apply on company site')",
+            ".jobs-details-top-card__job-actions button:has-text('Apply with LinkedIn')",
+            ".jobs-details-top-card__job-actions a:has-text('Apply with LinkedIn')",
+            ".jobs-details-top-card__job-actions button:has-text('Apply')",
+            ".jobs-details-top-card__job-actions a:has-text('Apply')",
+            "[data-control-name*='applyRouteControl'] button",
+            "[data-control-name*='applyRouteControl'] a",
         ]
 
         for selector in easy_selectors:
-            try:
-                if page.locator(selector).count() > 0:
-                    return ProcessedJobsDB.APPLY_MODE_EASY
-            except Exception:
-                continue
+            if _has_visible(selector):
+                return ProcessedJobsDB.APPLY_MODE_EASY
 
         for selector in external_selectors:
-            try:
-                if page.locator(selector).count() > 0:
-                    return ProcessedJobsDB.APPLY_MODE_EXTERNAL
-            except Exception:
-                continue
+            if _has_visible(selector):
+                return ProcessedJobsDB.APPLY_MODE_EXTERNAL
 
         return ProcessedJobsDB.APPLY_MODE_UNKNOWN
+
+    def _detect_apply_mode_for_job_url(self, active_page: Any, job_url: str) -> str:
+        """Detect apply mode on a URL-scoped probe page for stable per-job classification."""
+        probe_page = None
+        try:
+            probe_page = active_page.context.new_page()
+            probe_page.set_default_timeout(15000)
+            probe_page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
+            probe_page.wait_for_timeout(1200)
+            mode = self._detect_apply_mode(probe_page)
+            if mode == ProcessedJobsDB.APPLY_MODE_EASY:
+                if self._confirm_easy_apply_modal_on_probe(probe_page):
+                    return ProcessedJobsDB.APPLY_MODE_EASY
+                return ProcessedJobsDB.APPLY_MODE_UNKNOWN
+            return mode
+        except Exception as exc:
+            self.log_step("3.5", f"Apply-mode probe failed for {job_url}: {exc}; using active page fallback")
+            try:
+                return self._detect_apply_mode(active_page)
+            except Exception:
+                return ProcessedJobsDB.APPLY_MODE_UNKNOWN
+        finally:
+            if probe_page is not None:
+                try:
+                    probe_page.close()
+                except Exception:
+                    pass
+
+    def _confirm_easy_apply_modal_on_probe(self, page: Any) -> bool:
+        """Verify that clicking Easy Apply actually opens a modal flow."""
+        click_selectors = [
+            "[data-control-name*='jobdetails_topcard_inapply'] button",
+            "[data-control-name*='jobdetails_topcard_inapply'] a",
+            ".jobs-apply-button--top-card",
+            "button.jobs-apply-button--top-card",
+            "a.jobs-apply-button--top-card",
+            ".jobs-details-top-card__job-actions button:has-text('Easy Apply')",
+            ".jobs-details-top-card__job-actions a:has-text('Easy Apply')",
+            ".jobs-details-top-card__job-actions button[aria-label*='Easy Apply']",
+        ]
+
+        pre_page_count = len(page.context.pages)
+        pre_url = page.url
+
+        for selector in click_selectors:
+            try:
+                btn = page.locator(selector).first
+                if btn.count() < 1:
+                    continue
+                if not btn.is_visible(timeout=500):
+                    continue
+                if not btn.is_enabled(timeout=500):
+                    continue
+                try:
+                    btn.scroll_into_view_if_needed(timeout=800)
+                except Exception:
+                    pass
+                btn.click(timeout=4000)
+                page.wait_for_timeout(1600)
+
+                # Easy Apply should open a modal on the same page.
+                try:
+                    if page.locator(".jobs-easy-apply-modal, .artdeco-modal").count() > 0:
+                        return True
+                except Exception:
+                    pass
+
+                # If click opened another page or navigated away, this is not
+                # a reliable Easy Apply modal flow.
+                try:
+                    if len(page.context.pages) > pre_page_count:
+                        return False
+                except Exception:
+                    pass
+                try:
+                    post_url = page.url
+                except Exception:
+                    post_url = pre_url
+                if post_url != pre_url:
+                    return False
+            except Exception:
+                continue
+        return False
 
     @staticmethod
     def _canonicalize_job_url(url: str) -> str:
@@ -1853,7 +1973,11 @@ class LinkedInJobAgent:
                     clickable.click(timeout=3500)
                 else:
                     card.click(timeout=3500)
-                self.jitter("3.2")
+                remaining_budget = card_deadline - time.monotonic() - 0.75
+                if remaining_budget <= 0:
+                    self.log_step("3.5", f"Per-card deadline reached on card {index + 1}; continuing")
+                    continue
+                self.jitter("3.2", max_delay=min(1.2, remaining_budget))
 
                 if time.monotonic() >= card_deadline:
                     self.log_step("3.5", f"Per-card deadline reached on card {index + 1}; continuing")
@@ -1959,14 +2083,16 @@ class LinkedInJobAgent:
                     self.log_step("3.5", f"Skipping card {index + 1}: missing job URL")
                     continue
 
-                apply_mode = self._detect_apply_mode(page)
-
                 key_source = f"{title}|{company}|{job_url}"
                 job_key = hashlib.sha256(key_source.encode("utf-8")).hexdigest()
+                apply_mode = self._detect_apply_mode_for_job_url(page, job_url)
 
                 if self.db.seen(job_key):
                     self.db.upsert_job_metadata(job_key=job_key, apply_mode=apply_mode)
-                    self.log_step("3.3", f"Skipping already-processed job: {title} @ {company}")
+                    self.log_step(
+                        "3.3",
+                        f"Skipping already-processed job: {title} @ {company} (apply mode refresh: {apply_mode})",
+                    )
                     continue
 
                 job = JobRecord(
@@ -1980,7 +2106,7 @@ class LinkedInJobAgent:
                 )
                 self.db.add(job)
                 jobs.append(job)
-                self.log_step("3.4", f"Captured new job: {title} @ {company}")
+                self.log_step("3.4", f"Captured new job: {title} @ {company} (apply mode: {apply_mode})")
 
                 if time.monotonic() >= card_deadline:
                     self.log_step("3.5", f"Per-card deadline reached after capture for card {index + 1}")
@@ -5217,6 +5343,67 @@ class TelegramJobSession:
         digest = hashlib.sha1(normalized.lower().encode("utf-8")).hexdigest()[:10]
         return f"custom__{slug}__{digest}"
 
+    def _resolve_apply_answer(self, label: str, answers: Dict[str, str], hints: Optional[List[str]] = None) -> str:
+        """Resolve a best candidate answer using human labels plus machine field hints."""
+        normalized_label = normalize_form_label(label or "")
+        candidates: List[str] = []
+        if normalized_label:
+            candidates.append(normalized_label)
+
+        for hint in hints or []:
+            cleaned_hint = (str(hint or "")).replace("[", " ").replace("]", " ").replace("_", " ").replace("-", " ")
+            normalized_hint = normalize_form_label(cleaned_hint)
+            if normalized_hint:
+                candidates.append(normalized_hint)
+
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for text in candidates:
+            low = text.lower().strip()
+            if not low or low in seen:
+                continue
+            seen.add(low)
+            deduped.append(text)
+
+        for text in deduped:
+            lowered = text.lower()
+            for pattern, key in self.LABEL_TO_PROFILE_KEY:
+                if pattern.search(lowered):
+                    value = (answers.get(key) or "").strip()
+                    if value:
+                        return value
+
+        combined = " ".join(deduped).lower()
+        if "linkedin" in combined and ("url" in combined or "urls" in combined):
+            linkedin_value = (answers.get("linkedin") or "").strip()
+            if linkedin_value:
+                return linkedin_value
+
+        full_name = (answers.get("full_name") or "").strip()
+        if full_name and combined:
+            if re.search(r"\b(first|given)\b.*\bname\b|\bname\b.*\b(first|given)\b", combined):
+                parts = full_name.split()
+                return parts[0] if parts else full_name
+            if re.search(r"\b(last|family|surname)\b.*\bname\b|\bname\b.*\b(last|family|surname)\b", combined):
+                parts = full_name.split()
+                return parts[-1] if len(parts) > 1 else full_name
+            if (
+                "name" in combined
+                and "company" not in combined
+                and "employer" not in combined
+                and "manager" not in combined
+            ):
+                return full_name
+
+        if normalized_label:
+            custom_key = self._custom_key_from_label(normalized_label)
+            value = (answers.get(custom_key) or "").strip()
+            if value:
+                return value
+            legacy_custom_key = self._legacy_custom_key_from_label(normalized_label)
+            return (answers.get(legacy_custom_key) or "").strip()
+        return ""
+
     def _show_apply_summary(self) -> bool:
         """All Q&A answers collected. Show summary and ask user to Submit or Cancel."""
         job = self._current_job or {}
@@ -5366,7 +5553,13 @@ class TelegramJobSession:
         self._send(f"⏳ Opening LinkedIn and submitting your application for <b>{html.escape(title)}</b>…")
         self.logger.info(f"Telegram: Starting LinkedIn Easy Apply for job {job_id} ({title} @ {company})")
 
-        success, message = self._do_linkedin_easy_apply(job_url, answers, submit_application=True)
+        success, message = self._do_linkedin_easy_apply(
+            job_url,
+            answers,
+            submit_application=True,
+            allow_external_prefill=True,
+            force_headed=True,
+        )
 
         if success:
             try:
@@ -5381,29 +5574,12 @@ class TelegramJobSession:
                 "Reply <b>Next</b> to continue | <b>Done</b> to finish | <b>db</b> to browse DB"
             )
         else:
-            if "Detected external application flow" in (message or ""):
-                launch_success, launch_message = self._do_linkedin_easy_apply(
-                    job_url,
-                    answers,
-                    submit_application=False,
-                    allow_external_prefill=True,
-                    force_headed=True,
-                )
-                if launch_success:
-                    self._send(
-                        "⚠️ <b>This role uses an external apply flow.</b>\n"
-                        "I opened a browser and prefilled the external form with your summary answers.\n"
-                        "Please review and submit manually on the external page.\n\n"
-                        "Status has <b>not</b> been changed."
-                    )
-                    return True
-
+            if "automatic submit could not be confirmed" in (message or "").lower():
                 self._send(
-                    f"❌ <b>Submission failed.</b>\n"
+                    f"⚠️ <b>External form was prefilled, but submit was not confirmed.</b>\n"
                     f"{html.escape(message)}\n\n"
-                    f"I also tried launching a prefilled external form but failed: {html.escape(launch_message)}\n"
                     "Status has <b>not</b> been changed.\n"
-                    "Reply <b>Cancel</b> to abort this application | <b>Submit</b> to retry."
+                    "Reply <b>Submit</b> to retry or <b>Cancel</b> to abort this application."
                 )
                 return True
 
@@ -5594,12 +5770,13 @@ class TelegramJobSession:
                         else:
                             ext_url = page.url
                         self.logger.info(f"Easy Apply: external application flow detected ({ext_url})")
-                        if allow_external_prefill and not submit_application:
+                        if allow_external_prefill:
                             return self._prefill_external_application_form(
                                 page=external_page,
                                 answers=answers,
                                 cv_path=cv_path,
-                                keep_browser_open=not easy_apply_headless,
+                                keep_browser_open=(not easy_apply_headless and not submit_application),
+                                submit_application=submit_application,
                             )
                         return False, (
                             "Detected external application flow (Apply opens a separate application page). "
@@ -5739,6 +5916,7 @@ class TelegramJobSession:
         answers: Dict[str, str],
         cv_path: str,
         keep_browser_open: bool,
+        submit_application: bool,
     ) -> Tuple[bool, str]:
         """Best-effort prefill for external application pages (e.g. Lever)."""
         try:
@@ -5788,6 +5966,9 @@ class TelegramJobSession:
                 except Exception:
                     pass
 
+            if submit_application:
+                return self._submit_external_application_form(page, roots)
+
             if keep_browser_open:
                 try:
                     while not page.is_closed():
@@ -5799,6 +5980,121 @@ class TelegramJobSession:
         except Exception as exc:
             self.logger.warning(f"External prefill failed: {exc}")
             return False, f"External prefill failed: {exc}"
+
+    def _external_submission_confirmed(self, page: Any) -> bool:
+        success_indicators = [
+            "text=/application submitted/i",
+            "text=/your application was sent/i",
+            "text=/successfully applied/i",
+            "text=/thank you for applying/i",
+            "text=/thanks for applying/i",
+            "text=/we received your application/i",
+            "h1:has-text('Thank you')",
+            "h2:has-text('Thank you')",
+            "h3:has-text('Thank you')",
+        ]
+        for selector in success_indicators:
+            try:
+                if page.locator(selector).count() > 0:
+                    return True
+            except Exception:
+                continue
+        try:
+            lowered_url = (page.url or "").lower()
+            if any(token in lowered_url for token in ["thank", "submitted", "success", "confirmation"]):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _submit_external_application_form(self, page: Any, roots: List[Any]) -> Tuple[bool, str]:
+        """Try to submit an external application page after prefill."""
+        submit_selectors = [
+            "button[type='submit']",
+            "input[type='submit']",
+            "button:has-text('Submit')",
+            "button:has-text('Apply')",
+            "button:has-text('Send')",
+            "button[aria-label*='Submit']",
+            "button[aria-label*='Apply']",
+        ]
+        submit_tokens = [
+            *self._SUBMIT_BUTTON_TOKENS,
+            "apply",
+            "send",
+            "finish",
+            "complete",
+        ]
+
+        for attempt in range(3):
+            if self._external_submission_confirmed(page):
+                return True, "External application submitted successfully."
+
+            clicked_any = False
+            for root in roots:
+                for selector in submit_selectors:
+                    try:
+                        loc = root.locator(selector)
+                        candidate_count = min(loc.count(), 8)
+                    except Exception:
+                        continue
+
+                    for idx in range(candidate_count):
+                        try:
+                            btn = loc.nth(idx)
+                            if not btn.is_visible(timeout=400) or not btn.is_enabled(timeout=400):
+                                continue
+
+                            btn_text = ""
+                            try:
+                                btn_text = (btn.inner_text(timeout=400) or "").strip()
+                            except Exception:
+                                btn_text = ""
+                            if not btn_text:
+                                try:
+                                    btn_text = (btn.get_attribute("value", timeout=400) or "").strip()
+                                except Exception:
+                                    btn_text = ""
+
+                            normalized_text = normalize_form_label(btn_text).lower()
+                            if normalized_text and not any(token in normalized_text for token in submit_tokens):
+                                continue
+
+                            try:
+                                btn.scroll_into_view_if_needed(timeout=800)
+                            except Exception:
+                                pass
+                            btn.click(timeout=6000)
+                            clicked_any = True
+                            self.logger.info(
+                                f"External apply: clicked submit candidate {btn_text or selector!r} "
+                                f"(attempt {attempt + 1})"
+                            )
+
+                            try:
+                                page.wait_for_load_state("networkidle", timeout=6000)
+                            except Exception:
+                                pass
+                            try:
+                                page.wait_for_timeout(1400)
+                            except Exception:
+                                pass
+
+                            if self._external_submission_confirmed(page):
+                                return True, "External application submitted successfully."
+                        except Exception:
+                            continue
+
+            if not clicked_any:
+                try:
+                    page.wait_for_timeout(700)
+                except Exception:
+                    pass
+
+        return False, (
+            "External application form was prefilled, but automatic submit could not be confirmed. "
+            "Please review and submit manually on the external page."
+        )
 
     def _capture_visible_modal_field_snapshot(self, page: Any) -> List[Tuple[str, str]]:
         """Capture visible modal field labels/values for a browser-confirmed preview snapshot."""
@@ -5954,6 +6250,14 @@ class TelegramJobSession:
                 except Exception:
                     pass
                 try:
+                    parent_lbl = inp.locator("xpath=ancestor::label[1]").first
+                    if parent_lbl.count() > 0:
+                        text = parent_lbl.inner_text(timeout=400) or ""
+                        if text.strip():
+                            return text.strip()
+                except Exception:
+                    pass
+                try:
                     placeholder = inp.get_attribute("placeholder", timeout=400) or ""
                     if placeholder.strip():
                         return placeholder.strip()
@@ -5961,16 +6265,18 @@ class TelegramJobSession:
                     pass
                 return ""
 
-            def _answer_for_label(label: str) -> str:
-                lowered = label.lower()
-                for pattern, key in self.LABEL_TO_PROFILE_KEY:
-                    if pattern.search(lowered):
-                        return answers.get(key, "")
-                custom_key = self._custom_key_from_label(label)
-                if custom_key in answers:
-                    return answers.get(custom_key, "")
-                legacy_custom_key = self._legacy_custom_key_from_label(label)
-                return answers.get(legacy_custom_key, "")
+            def _get_field_hints(inp: Any, label_text: str) -> List[str]:
+                hints: List[str] = []
+                if label_text:
+                    hints.append(label_text)
+                for attr in ["name", "id", "autocomplete", "placeholder", "aria-label", "data-qa", "data-testid"]:
+                    try:
+                        raw = (inp.get_attribute(attr, timeout=250) or "").strip()
+                    except Exception:
+                        raw = ""
+                    if raw:
+                        hints.append(raw)
+                return hints
 
             for fi in page.locator("input[type='file']").all():
                 try:
@@ -6025,23 +6331,22 @@ class TelegramJobSession:
                         continue
 
                     label_text = _get_label(inp)
-                    if not label_text:
-                        continue
-
-                    fill_value = _answer_for_label(label_text)
-                    label_lower = label_text.lower()
+                    field_hints = _get_field_hints(inp, label_text)
+                    fill_value = self._resolve_apply_answer(label_text, answers, hints=field_hints)
+                    hint_blob = " ".join(field_hints).lower()
                     full_name = answers.get("full_name", "")
                     if full_name:
-                        if "first" in label_lower:
+                        if "first" in hint_blob or "given" in hint_blob:
                             parts = full_name.split()
                             fill_value = parts[0] if parts else full_name
-                        elif "last" in label_lower:
+                        elif "last" in hint_blob or "family" in hint_blob or "surname" in hint_blob:
                             parts = full_name.split()
                             fill_value = parts[-1] if len(parts) > 1 else full_name
 
                     if fill_value:
                         inp.fill(fill_value, timeout=3000)
-                        self.logger.info(f"Easy Apply: filled '{label_text}'")
+                        display_label = label_text or next((h for h in field_hints if h), "(unlabeled field)")
+                        self.logger.info(f"Easy Apply: filled '{display_label}'")
                 except Exception:
                     continue
 
@@ -6050,9 +6355,8 @@ class TelegramJobSession:
                     if not sel_el.is_visible(timeout=500):
                         continue
                     label_text = _get_label(sel_el)
-                    if not label_text:
-                        continue
-                    desired = (_answer_for_label(label_text) or "").strip()
+                    field_hints = _get_field_hints(sel_el, label_text)
+                    desired = (self._resolve_apply_answer(label_text, answers, hints=field_hints) or "").strip()
                     if not desired:
                         continue
 
@@ -6093,7 +6397,7 @@ class TelegramJobSession:
                     if not legend:
                         continue
 
-                    desired = (_answer_for_label(legend) or "").strip().lower()
+                    desired = (self._resolve_apply_answer(legend, answers, hints=[legend]) or "").strip().lower()
                     if not desired:
                         continue
 
@@ -6151,7 +6455,7 @@ class TelegramJobSession:
                     if not label_text:
                         continue
 
-                    desired = (_answer_for_label(label_text) or "").strip().lower()
+                    desired = (self._resolve_apply_answer(label_text, answers, hints=[label_text]) or "").strip().lower()
                     if not desired:
                         continue
 
@@ -6375,6 +6679,11 @@ def run_telegram_notify(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Autonomous LinkedIn Job Agent")
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
+    parser.add_argument(
+        "--reset-db",
+        action="store_true",
+        help="Delete processed_jobs.db and sqlite sidecars before running",
+    )
     parser.add_argument("--max-jobs", type=int, default=8, help="How many jobs to inspect (5-10)")
     parser.add_argument(
         "--query",
@@ -6478,9 +6787,38 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def reset_processed_jobs_db(base_dir: Path) -> None:
+    """Best-effort reset of processed_jobs.db and sqlite sidecar files."""
+    targets = [
+        base_dir / "processed_jobs.db",
+        base_dir / "processed_jobs.db-wal",
+        base_dir / "processed_jobs.db-shm",
+    ]
+
+    last_error: Optional[Exception] = None
+    for _ in range(3):
+        last_error = None
+        for path in targets:
+            if not path.exists():
+                continue
+            try:
+                path.unlink()
+            except Exception as exc:
+                last_error = exc
+        if all(not p.exists() for p in targets):
+            return
+        time.sleep(0.25)
+
+    if any(p.exists() for p in targets):
+        raise RuntimeError(f"Could not reset DB files in {base_dir}: {last_error}")
+
+
 def main() -> None:
     args = parse_args()
     base_dir = Path(__file__).resolve().parent
+
+    if args.reset_db:
+        reset_processed_jobs_db(base_dir)
 
     if args.report_mode:
         run_report_mode(args=args, base_dir=base_dir)
