@@ -2564,6 +2564,7 @@ class TelegramJobSession:
         self._apply_scan_unverified: bool = False
         self._apply_field_options: Dict[str, List[str]] = {}
         self._apply_field_types: Dict[str, str] = {}
+        self._option_resolution_state: Optional[Dict[str, Any]] = None
         self._return_state_after_apply: str = self.STATE_INTRO
         self._prefill_launch_server: Optional[ThreadingHTTPServer] = None
         self._prefill_launch_thread: Optional[threading.Thread] = None
@@ -4670,12 +4671,184 @@ class TelegramJobSession:
                 return index
         return len(self._apply_form_fields)
 
+    def _match_option_exact(self, answer: str, options: List[str]) -> Optional[str]:
+        normalized_answer = normalize_form_label(answer or "").lower()
+        if not normalized_answer:
+            return None
+        for option in options:
+            if normalize_form_label(option or "").lower() == normalized_answer:
+                return option
+        return None
+
+    def _find_option_matches(self, substring: str, options: List[str]) -> List[str]:
+        token = normalize_form_label(substring or "").lower()
+        if not token:
+            return []
+        matches: List[str] = []
+        for option in options:
+            normalized = normalize_form_label(option or "")
+            if token in normalized.lower() and option not in matches:
+                matches.append(option)
+        return matches
+
+    def _prune_invalid_prefilled_option_answers(self) -> List[str]:
+        """Remove saved/prefilled option answers that do not exactly match available options."""
+        invalid_labels: List[str] = []
+        touched_profile = False
+        option_field_types = {"radio", "checkbox", "select", "action"}
+
+        for field_key, _prompt in self._apply_form_fields:
+            existing = (self._apply_answers.get(field_key) or "").strip()
+            if not existing:
+                continue
+            ftype = self._apply_field_types.get(field_key, "")
+            options = self._apply_field_options.get(field_key, [])
+            if not options or ftype not in option_field_types:
+                continue
+            if self._match_option_exact(existing, options):
+                continue
+
+            invalid_labels.append(self._apply_field_labels.get(field_key, field_key))
+            self._apply_answers.pop(field_key, None)
+            if field_key in self._saved_profile:
+                self._saved_profile.pop(field_key, None)
+                touched_profile = True
+
+            if field_key.startswith("custom__"):
+                label = self._apply_field_labels.get(field_key, "")
+                if label:
+                    legacy_key = self._legacy_custom_key_from_label(label)
+                    if legacy_key in self._saved_profile:
+                        self._saved_profile.pop(legacy_key, None)
+                        touched_profile = True
+
+        if touched_profile:
+            self._persist_saved_profile()
+        return invalid_labels
+
+    def _handle_option_resolution_input(self, field_key: str, user_input: str) -> Tuple[bool, str]:
+        """
+        Handle option resolution protocol.
+        Returns (resolved, resolved_value). If resolved is False, caller should keep waiting.
+        """
+        state = self._option_resolution_state or {}
+        if state.get("field_key") != field_key:
+            return False, ""
+
+        options: List[str] = list(state.get("options") or [])
+        if not options:
+            self._option_resolution_state = None
+            return False, ""
+
+        answer = (user_input or "").strip()
+        if not answer:
+            self._send("⚠️ Empty input. Please send a substring from one of the options.")
+            return False, ""
+
+        phase = str(state.get("phase") or "await_substring")
+
+        if phase == "await_confirm":
+            if answer.lower() == "confirm":
+                selected = str(state.get("selected") or "").strip()
+                if selected:
+                    self._option_resolution_state = None
+                    return True, selected
+            state["phase"] = "await_substring"
+            self._option_resolution_state = state
+            phase = "await_substring"
+
+        if phase == "await_pick":
+            matches: List[str] = list(state.get("matches") or [])
+            if answer.isdigit():
+                idx = int(answer) - 1
+                if 0 <= idx < len(matches):
+                    selected = matches[idx]
+                    self._option_resolution_state = None
+                    return True, selected
+                self._send(f"⚠️ Invalid option number. Choose 1-{len(matches)} or send a new substring.")
+                return False, ""
+            state["phase"] = "await_substring"
+            self._option_resolution_state = state
+
+        # await_substring
+        if answer.isdigit():
+            idx = int(answer) - 1
+            if 0 <= idx < len(options):
+                selected = options[idx]
+                self._option_resolution_state = None
+                return True, selected
+
+        exact = self._match_option_exact(answer, options)
+        if exact:
+            state["phase"] = "await_confirm"
+            state["selected"] = exact
+            self._option_resolution_state = state
+            self._send(
+                "🔎 Exact option matched:\n"
+                f"<b>{html.escape(exact)}</b>\n"
+                "Reply <b>Confirm</b> to use it, or send another substring."
+            )
+            return False, ""
+
+        matches = self._find_option_matches(answer, options)
+        if not matches:
+            self._send("⚠️ No options matched that substring. Send another substring.")
+            return False, ""
+
+        if len(matches) == 1:
+            selected = matches[0]
+            state["phase"] = "await_confirm"
+            state["selected"] = selected
+            self._option_resolution_state = state
+            self._send(
+                "🔎 Matched option:\n"
+                f"<b>{html.escape(selected)}</b>\n"
+                "Reply <b>Confirm</b> to use it, or send another substring."
+            )
+            return False, ""
+
+        max_show = 25
+        visible_matches = matches[:max_show]
+        lines = [f"{i + 1}) {html.escape(opt)}" for i, opt in enumerate(visible_matches)]
+        tail = ""
+        if len(matches) > max_show:
+            tail = f"\n... and {len(matches) - max_show} more match(es). Send a narrower substring if needed."
+        state["phase"] = "await_pick"
+        state["matches"] = visible_matches
+        self._option_resolution_state = state
+        self._send(
+            "🔎 Multiple options matched your substring.\n"
+            "Reply with the option number:\n"
+            + "\n".join(lines)
+            + tail
+        )
+        return False, ""
+
     def _send_current_apply_prompt(self) -> None:
         if self._apply_question_idx >= len(self._apply_form_fields):
             return
         key, prompt = self._apply_form_fields[self._apply_question_idx]
         if key not in self._apply_asked_field_keys:
             self._apply_asked_field_keys.append(key)
+        ftype = self._apply_field_types.get(key, "")
+        options = self._apply_field_options.get(key, [])
+        if options and ftype in {"radio", "checkbox", "select", "action"}:
+            self._option_resolution_state = {
+                "field_key": key,
+                "phase": "await_substring",
+                "options": options,
+                "matches": [],
+                "selected": "",
+            }
+            self._send(
+                prompt
+                + "\n\n"
+                + "🔎 Protocol: send a substring from your desired option. "
+                + "If one option matches, reply <b>Confirm</b>. "
+                + "If several match, I'll send a numbered sub-list for selection."
+            )
+            return
+        self._option_resolution_state = None
         self._send(prompt)
 
     def _validate_apply_answer(self, field_key: str, raw_answer: str) -> Tuple[bool, str, str]:
@@ -4697,12 +4870,7 @@ class TelegramJobSession:
             for option in options:
                 if lowered == option.lower():
                     return True, "", option
-
-            if ftype == "select":
-                # Large country/region lists can be huge; accept free-text value.
-                return True, "", answer
-
-            return False, "⚠️ Please answer with one of the listed options (or its number).", ""
+            return False, "⚠️ Selection not recognized. Send a substring from a valid option.", ""
 
         if field_key == "cv_path":
             candidate = Path(answer)
@@ -5092,6 +5260,7 @@ class TelegramJobSession:
         self._return_state_after_apply = self._state
         self._state = self.STATE_APPLYING
         self._apply_answers = {}
+        self._option_resolution_state = None
         for field_key, _prompt in self._apply_form_fields:
             saved_value = (self._saved_profile.get(field_key) or "").strip()
             if not saved_value and field_key.startswith("custom__"):
@@ -5101,6 +5270,8 @@ class TelegramJobSession:
                     saved_value = (self._saved_profile.get(legacy_key) or "").strip()
             if saved_value:
                 self._apply_answers[field_key] = saved_value
+
+        invalid_prefilled_labels = self._prune_invalid_prefilled_option_answers()
         self._apply_asked_field_keys = []
         self._apply_question_idx = self._first_missing_apply_field_idx()
         self._apply_in_progress_job_id = self._current_job.get("id")
@@ -5114,6 +5285,16 @@ class TelegramJobSession:
             self._send(
                 f"💾 Loaded <b>{loaded_count}</b> saved profile field(s), so I'll ask only missing details.\n"
                 "Reply <b>reset profile</b> anytime (outside apply flow) to clear saved values."
+            )
+        if invalid_prefilled_labels:
+            label_lines = "\n".join(f"  • {html.escape(lbl)}" for lbl in invalid_prefilled_labels[:10])
+            extra = ""
+            if len(invalid_prefilled_labels) > 10:
+                extra = f"\n  • ... and {len(invalid_prefilled_labels) - 10} more"
+            self._send(
+                "⚠️ Some saved selection answers are no longer valid for the current option lists.\n"
+                "I removed them and will ask you again:\n"
+                f"{label_lines}{extra}"
             )
 
         if self._apply_question_idx >= len(self._apply_form_fields):
@@ -5200,6 +5381,7 @@ class TelegramJobSession:
         jid = self._apply_in_progress_job_id
         self._apply_in_progress_job_id = None
         self._apply_answers = {}
+        self._option_resolution_state = None
         self._apply_asked_field_keys = []
         self._apply_question_idx = 0
         self._apply_form_fields = []
@@ -5222,6 +5404,14 @@ class TelegramJobSession:
             return self._show_apply_summary()
 
         key, _prompt = self._apply_form_fields[self._apply_question_idx]
+        ftype = self._apply_field_types.get(key, "")
+        options = self._apply_field_options.get(key, [])
+        if options and ftype in {"radio", "checkbox", "select", "action"}:
+            resolved, resolved_value = self._handle_option_resolution_input(key, answer)
+            if not resolved:
+                return True
+            answer = resolved_value
+
         is_valid, error_message, normalized_answer = self._validate_apply_answer(key, answer)
         if not is_valid:
             self._send(error_message)
@@ -5229,6 +5419,7 @@ class TelegramJobSession:
             return True
 
         self._apply_answers[key] = normalized_answer
+        self._option_resolution_state = None
         # Persist all answers, including stable custom question keys.
         self._saved_profile[key] = normalized_answer
         self._persist_saved_profile()
@@ -5756,6 +5947,7 @@ class TelegramJobSession:
         self._apply_in_progress_job_id = None
         self._apply_question_idx = 0
         self._apply_answers = {}
+        self._option_resolution_state = None
         self._apply_asked_field_keys = []
         self._apply_form_fields = []
         self._apply_field_labels = {}

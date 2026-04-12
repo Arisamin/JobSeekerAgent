@@ -1,25 +1,3 @@
 {
-  "chat_profiles": {
-    "6128016116": {
-      "cv_path": "C:\\MyData\\Ariel CV - 2026 [2].pdf",
-      "cover_letter_path": "C:\\MyData\\Ariel CV - 2026 [2].pdf",
-      "full_name": "Abu Gabi",
-      "email": "baba.guba@gmail.com",
-      "phone": "050-8008008",
-      "location": "Mugamba",
-      "linkedin": "https://www.linkedin.com/jobs/view/4366001366/",
-      "github": "https://github.com/settings/billing",
-      "motivation": "My cover letter is C",
-      "custom__what_is_your_gender___optional__aa1b2b7ecd": "Non-binary",
-      "custom__the_position_is_located_in_jerusalem_and_req__502883fc08": "No, position isn't relevant for me",
-      "custom__we_kindly_request_that_you_make_us_aware_if__bb12513460": "I have a family member working at Mobileye",
-      "custom__yes__mobileye_can_contact_me_about_future_jo__bb50065bcc": "No",
-      "custom__family_member_working_at_mobileye__36d419ce0f": "I don't have any family member working at Mobileye",
-      "custom__yes__mobileye_can_contact_me_about_future_jo__f6a41ae855": "Yes",
-      "custom__current_company__db10dfaa7c": "babuna",
-      "custom__your_full_linkedin_profile_will_be__8abbffc0a7": "ok",
-      "custom__linkedin_profile__4661a6e4c0": "Skip",
-      "custom__shared__learn_more__d391ec50af": "say what"
-    }
-  }
+  "chat_profiles": {}
 }

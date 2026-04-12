@@ -166,14 +166,90 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertNotIn("26) Country 26", prompt)
         self.assertIn("more option(s) not shown", prompt)
 
-    def test_validate_apply_answer_allows_free_text_for_select(self):
+    def test_validate_apply_answer_rejects_unknown_free_text_for_select(self):
         session = self._make_session()
         session._apply_field_types = {"custom__country": "select"}
         session._apply_field_options = {"custom__country": ["Afghanistan", "Albania", "Algeria"]}
 
         is_valid, _, normalized = session._validate_apply_answer("custom__country", "Thailand")
-        self.assertTrue(is_valid)
-        self.assertEqual(normalized, "Thailand")
+        self.assertFalse(is_valid)
+        self.assertEqual(normalized, "")
+
+    def test_option_resolution_requires_confirm_for_exact_match(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+        session._persist_saved_profile = lambda: None
+
+        session._state = session.STATE_APPLYING
+        session._current_job = {"id": 1, "title": "Role", "company": "Comp", "url": "https://www.linkedin.com/jobs/view/1/"}
+        session._apply_form_fields = [
+            ("custom__country", "🔽 Country:"),
+            ("full_name", "✍️ Full name:"),
+        ]
+        session._apply_field_types = {"custom__country": "select", "full_name": "text"}
+        session._apply_field_options = {"custom__country": ["Afghanistan", "Albania", "Algeria"]}
+        session._apply_answers = {}
+        session._apply_question_idx = 0
+
+        session._send_current_apply_prompt()
+        session._handle_apply_answer("Albania")
+
+        self.assertNotIn("custom__country", session._apply_answers)
+        self.assertIsNotNone(session._option_resolution_state)
+        self.assertEqual(session._option_resolution_state.get("phase"), "await_confirm")
+
+        session._handle_apply_answer("Confirm")
+        self.assertEqual(session._apply_answers.get("custom__country"), "Albania")
+        self.assertEqual(session._apply_question_idx, 1)
+
+    def test_option_resolution_allows_number_selection_from_match_sublist(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+        session._persist_saved_profile = lambda: None
+
+        session._state = session.STATE_APPLYING
+        session._current_job = {"id": 1, "title": "Role", "company": "Comp", "url": "https://www.linkedin.com/jobs/view/1/"}
+        session._apply_form_fields = [
+            ("custom__location", "🔽 Location:"),
+            ("full_name", "✍️ Full name:"),
+        ]
+        session._apply_field_types = {"custom__location": "select", "full_name": "text"}
+        session._apply_field_options = {
+            "custom__location": [
+                "Bangkok, Thailand",
+                "Bangalore, India",
+                "Tel Aviv, Israel",
+            ]
+        }
+        session._apply_answers = {}
+        session._apply_question_idx = 0
+
+        session._send_current_apply_prompt()
+        session._handle_apply_answer("Bang")
+
+        self.assertEqual(session._option_resolution_state.get("phase"), "await_pick")
+        session._handle_apply_answer("2")
+
+        self.assertEqual(session._apply_answers.get("custom__location"), "Bangalore, India")
+        self.assertEqual(session._apply_question_idx, 1)
+
+    def test_prune_invalid_prefilled_option_answers_removes_stale_value(self):
+        session = self._make_session()
+        session._persist_saved_profile = lambda: None
+        session._apply_form_fields = [("custom__country", "prompt")]
+        session._apply_field_labels = {"custom__country": "In which country are you currently based?"}
+        session._apply_field_types = {"custom__country": "select"}
+        session._apply_field_options = {"custom__country": ["Israel", "Thailand", "United States"]}
+        session._apply_answers = {"custom__country": "Mars"}
+        session._saved_profile = {"custom__country": "Mars"}
+
+        invalid_labels = session._prune_invalid_prefilled_option_answers()
+
+        self.assertIn("In which country are you currently based?", invalid_labels)
+        self.assertNotIn("custom__country", session._apply_answers)
+        self.assertNotIn("custom__country", session._saved_profile)
 
 
 class _FakeLeaf:
