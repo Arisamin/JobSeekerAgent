@@ -2,35 +2,38 @@
 setlocal
 
 REM ---------------------------------------------------------------------------
-REM Start_Agent_Normal_Mode.bat
+REM Start_Agent_Search_Mode.bat
 REM
 REM Default behavior:
 REM   - Starts agent_engine.py with Telegram notifications enabled
-REM   - Uses --easy-apply-run-mode normal
+REM   - Uses --easy-apply-run-mode search
 REM   - Uses --max-jobs 5
 REM   - Uses --headless (no visible browser window)
 REM
 REM Copy-paste commands (PowerShell, from repo root):
 REM   1) Default run:
-REM      .\Start_Agent_Normal_Mode.bat
+REM      .\Start_Agent_Search_Mode.bat
 REM
-REM   2) Normal mode + more jobs:
-REM      .\Start_Agent_Normal_Mode.bat --max-jobs 8
+REM   2) Search mode + more jobs:
+REM      .\Start_Agent_Search_Mode.bat --max-jobs 8
 
 REM   2b) Force fresh run (reset DB before scan):
-REM      .\Start_Agent_Normal_Mode.bat --max-jobs 5 --headless --reset-db
+REM      .\Start_Agent_Search_Mode.bat --max-jobs 5 --headless --reset-db
+
+REM   2c) Easy Apply only discovery mode:
+REM      .\Start_Agent_Search_Mode.bat --easy-apply-only
 REM
 REM   3) Testing traversal mode:
-REM      .\Start_Agent_Normal_Mode.bat --easy-apply-run-mode testing
+REM      .\Start_Agent_Search_Mode.bat --easy-apply-run-mode testing
 REM
 REM   4) Override query:
-REM      .\Start_Agent_Normal_Mode.bat --query "Senior C# Developer Israel"
+REM      .\Start_Agent_Search_Mode.bat --query "Senior C# Developer Israel"
 REM
 REM   5) Pass Telegram token/chat ID on command line for this run only:
-REM      .\Start_Agent_Normal_Mode.bat --telegram-bot-token "<token>" --telegram-chat-id 123456789
+REM      .\Start_Agent_Search_Mode.bat --telegram-bot-token "<token>" --telegram-chat-id 123456789
 REM
 REM   6) Headless browser run (default in this launcher):
-REM      .\Start_Agent_Normal_Mode.bat
+REM      .\Start_Agent_Search_Mode.bat
 REM
 REM Note:
 REM   Any arguments passed to this .bat are appended via %%* to python command.
@@ -73,13 +76,13 @@ if "%TELEGRAM_CHAT_ID%"=="" (
     exit /b 1
 )
 
-echo Starting Job Seeker Agent in normal mode...
+echo Starting Job Seeker Agent in search mode...
 echo.
 
 set "BASELINE_AGENT_PIDS="
 for /f "delims=" %%A in ('powershell -NoProfile -Command "$p=Get-CimInstance Win32_Process ^| Where-Object { $_.Name -match '^python(\.exe)?$' -and $_.CommandLine -match 'agent_engine\.py' } ^| Select-Object -ExpandProperty ProcessId; if($p){($p -join ',')}" ^| findstr /r "^[0-9][0-9,]*$"') do set "BASELINE_AGENT_PIDS=%%A"
 
-".venv\Scripts\python.exe" "agent_engine.py" --telegram-notify --max-jobs 5 --easy-apply-run-mode normal --headless %*
+".venv\Scripts\python.exe" "agent_engine.py" --telegram-notify --max-jobs 5 --easy-apply-run-mode search --headless %*
 set EXIT_CODE=%ERRORLEVEL%
 
 powershell -NoProfile -Command "$baseline=@(); if('%BASELINE_AGENT_PIDS%' -ne ''){$baseline='%BASELINE_AGENT_PIDS%'.Split(',') ^| ForEach-Object {[int]$_}}; $b=@{}; $baseline ^| ForEach-Object { $b[$_] = $true }; $current=Get-CimInstance Win32_Process ^| Where-Object { $_.Name -match '^python(\.exe)?$' -and $_.CommandLine -match 'agent_engine\.py' } ^| Select-Object -ExpandProperty ProcessId; $new=@($current ^| Where-Object { -not $b.ContainsKey($_) }); if($new.Count -gt 0){ $new ^| ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }; Write-Host ('[RUNNER] Cleanup: stopped launched agent_engine.py PIDs: ' + ($new -join ', ')) } else { Write-Host '[RUNNER] Cleanup: no newly launched agent_engine.py process to stop.' }"

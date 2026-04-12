@@ -25,6 +25,21 @@ class TestReportModeParsing(unittest.TestCase):
             args = agent_engine.parse_args()
         self.assertTrue(args.reset_db)
 
+    def test_parse_args_defaults_easy_apply_run_mode_to_search(self):
+        with patch.object(sys, "argv", ["agent_engine.py"]):
+            args = agent_engine.parse_args()
+        self.assertEqual(args.easy_apply_run_mode, "search")
+
+    def test_parse_args_accepts_easy_apply_only_flag(self):
+        with patch.object(sys, "argv", ["agent_engine.py", "--easy-apply-only"]):
+            args = agent_engine.parse_args()
+        self.assertTrue(args.easy_apply_only)
+
+    def test_parse_args_rejects_legacy_normal_easy_apply_run_mode(self):
+        with patch.object(sys, "argv", ["agent_engine.py", "--easy-apply-run-mode", "normal"]):
+            with self.assertRaises(SystemExit):
+                agent_engine.parse_args()
+
 
 class TestDbResetHelper(unittest.TestCase):
     def test_reset_processed_jobs_db_removes_db_and_sidecars(self):
@@ -62,6 +77,43 @@ class TestReportActionsServerLatestReport(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         self.assertEqual(selected.name, "run_report_20260411_000610.html")
+
+
+class TestSearchUrlFilters(unittest.TestCase):
+    def _make_agent(self, easy_apply_only: bool):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+
+        agent = agent_engine.LinkedInJobAgent(
+            base_dir=base,
+            max_jobs=5,
+            headless=True,
+            query="Senior C# Developer Israel",
+            user_data_dir=None,
+            max_run_seconds=60,
+            max_extract_seconds=30,
+            per_card_seconds=10,
+            easy_apply_only=easy_apply_only,
+        )
+        self.addCleanup(agent.db.close)
+        for handler in list(agent.logger.handlers):
+            self.addCleanup(handler.close)
+        return agent
+
+    def test_build_search_url_includes_easy_apply_filter_when_enabled(self):
+        agent = self._make_agent(easy_apply_only=True)
+        url = agent.build_search_url()
+
+        self.assertIn("/jobs/search/?", url)
+        self.assertIn("f_AL=true", url)
+        self.assertIn("f_al=true", url.lower())
+
+    def test_build_search_url_omits_easy_apply_filter_when_disabled(self):
+        agent = self._make_agent(easy_apply_only=False)
+        url = agent.build_search_url()
+
+        self.assertNotIn("f_AL=true", url)
 
 
 class TestJobMetadataPersistence(unittest.TestCase):
@@ -129,7 +181,7 @@ class TestTelegramApplyModeDisplay(unittest.TestCase):
             new_jobs=[],
             query="q",
             logger=logger,
-            easy_apply_run_mode="normal",
+            easy_apply_run_mode="search",
         )
 
     def test_job_card_includes_easy_apply_mode_icon_and_text(self):
@@ -141,11 +193,14 @@ class TestTelegramApplyModeDisplay(unittest.TestCase):
                 "company": "Acme",
                 "url": "https://www.linkedin.com/jobs/view/1/",
                 "status": "Discovered",
+                "recommendation": "STRONG MATCH",
                 "apply_mode": "Easy Apply",
             },
             index=1,
             total=3,
         )
+        self.assertIn("Recommendation:", text)
+        self.assertIn("STRONG MATCH", text)
         self.assertIn("Apply Mode:", text)
         self.assertIn("Easy Apply", text)
         self.assertIn("⚡", text)
@@ -159,11 +214,14 @@ class TestTelegramApplyModeDisplay(unittest.TestCase):
                 "company": "Beta",
                 "url": "https://www.linkedin.com/jobs/view/2/",
                 "status": "Discovered",
+                "recommendation": "REVIEW MANUALLY",
                 "apply_mode": "External Apply",
             },
             index=1,
             total=1,
         )
+        self.assertIn("Recommendation:", text)
+        self.assertIn("REVIEW MANUALLY", text)
         self.assertIn("Apply Mode:", text)
         self.assertIn("External Apply", text)
         self.assertIn("🌐", text)
@@ -249,6 +307,19 @@ class _FakeLocator:
 
     def nth(self, idx: int):
         return self._items[idx]
+
+
+class _FakeCardForEasyApplyFallback:
+    def __init__(self, text: str):
+        self._text = text
+
+    def locator(self, selector: str):
+        if "Easy Apply" in self._text:
+            return _FakeLocator([_FakeLocatorItem("Easy Apply", True)])
+        return _FakeLocator([])
+
+    def inner_text(self, timeout: int = 0):
+        return self._text
 
 
 class _FakePageForApplyMode:
@@ -347,6 +418,40 @@ class TestApplyModeDetection(unittest.TestCase):
         active_page.context = _FakeProbeContext(probe_page)
 
         mode = agent._detect_apply_mode_for_job_url(active_page, "https://www.linkedin.com/jobs/view/4374291012/")
+        self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN)
+
+    def test_should_include_discovered_job_respects_easy_apply_only_flag(self):
+        agent = self._make_agent()
+        agent.easy_apply_only = True
+
+        self.assertTrue(agent._should_include_discovered_job(agent_engine.ProcessedJobsDB.APPLY_MODE_EASY))
+        self.assertFalse(agent._should_include_discovered_job(agent_engine.ProcessedJobsDB.APPLY_MODE_EXTERNAL))
+        self.assertFalse(agent._should_include_discovered_job(agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN))
+
+    def test_finalize_apply_mode_coerces_unknown_when_easy_apply_url_filter_active(self):
+        agent = self._make_agent()
+        agent.easy_apply_only = True
+        agent._search_url_has_easy_apply_filter = True
+
+        mode = agent._finalize_apply_mode_for_discovery(
+            agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN,
+            _FakeCardForEasyApplyFallback("Random card body"),
+            "https://www.linkedin.com/jobs/view/123/",
+        )
+
+        self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_EASY)
+
+    def test_finalize_apply_mode_keeps_unknown_without_easy_apply_url_filter(self):
+        agent = self._make_agent()
+        agent.easy_apply_only = True
+        agent._search_url_has_easy_apply_filter = False
+
+        mode = agent._finalize_apply_mode_for_discovery(
+            agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN,
+            _FakeCardForEasyApplyFallback("Random card body"),
+            "https://www.linkedin.com/jobs/view/456/",
+        )
+
         self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN)
 
 

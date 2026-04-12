@@ -18,28 +18,48 @@ Expected behavior:
 - Console prints: `Starting Job Seeker Report Mode...`
 - Then: `Report Mode stopped. You can close this window.`
 
-## 2) Run normal flow mode
+## 2) Run search flow mode
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Normal_Mode.bat
+.\Start_Agent_Search_Mode.bat
 ```
 
 Force a fresh run (clear DB first inside agent startup):
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Normal_Mode.bat --max-jobs 5 --headless --reset-db
+.\Start_Agent_Search_Mode.bat --max-jobs 5 --headless --reset-db
 ```
 
 What it does:
 - Starts the regular Telegram-driven flow.
-- Uses `--easy-apply-run-mode normal`, `--max-jobs 5`, and `--headless` (from launcher defaults).
+- Uses `--easy-apply-run-mode search`, `--max-jobs 5`, and `--headless` (from launcher defaults).
+- `--max-jobs` is a target count of new DB additions for this run, not a cap on scanned cards.
 
 Expected behavior:
-- Console prints: `Starting Job Seeker Agent in normal mode...`
+- Console prints: `Starting Job Seeker Agent in search mode...`
 - Telegram session should start and accept commands like `Next`, `Apply`, `Preview`, `Submit`.
-- Normal mode does **not** auto-open a report page in browser.
+- Search mode does **not** auto-open a report page in browser.
+
+Easy Apply-only discovery mode:
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\Start_Agent_Search_Mode.bat --easy-apply-only
+```
+
+Important note:
+- `--easy-apply-run-mode search` controls apply-flow scanning behavior only.
+- It does not filter discovered jobs to Easy Apply.
+- Use `--easy-apply-only` for discovery filtering.
+- Extraction now keeps scanning result cards until target is reached or result feed is exhausted.
+
+Expected behavior in Easy Apply-only mode:
+- LinkedIn search URL includes `f_AL=true` (Easy Apply filter) before scanning cards.
+- If per-job probe is inconclusive (`Unknown`), the run trusts the filtered search feed and treats the card as Easy Apply.
+- Jobs without confirmed Easy Apply are filtered out during discovery.
+- Only jobs classified as `Easy Apply` are added as newly discovered jobs.
 
 If your browser keeps showing an old report (for example `Generated: 2026-04-08 ...`):
 - You are likely viewing a previously opened local HTML tab, not the live latest-report server.
@@ -50,12 +70,12 @@ Optional examples:
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Normal_Mode.bat --max-jobs 8
+.\Start_Agent_Search_Mode.bat --max-jobs 8
 ```
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Normal_Mode.bat --query "Senior C# Developer Israel"
+.\Start_Agent_Search_Mode.bat --query "Senior C# Developer Israel"
 ```
 
 ## 3) Clear jobs DB

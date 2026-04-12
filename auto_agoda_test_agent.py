@@ -41,7 +41,7 @@ class AutoAgodaTestAgent:
         self.max_jobs = max_jobs
         self.query = query
         mode = (easy_apply_run_mode or "testing").strip().lower()
-        self.easy_apply_run_mode = mode if mode in {"normal", "testing"} else "testing"
+        self.easy_apply_run_mode = mode if mode in {"search", "testing"} else "testing"
         self.preview_before_submit = preview_before_submit
         self.mirror_to_telegram = mirror_to_telegram
         self.telegram_bot_token = (telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
@@ -380,7 +380,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--easy-apply-run-mode",
-        choices=["normal", "testing"],
+        choices=["search", "testing"],
         default="testing",
         help="Easy Apply scan traversal mode for apply flow (default: testing)",
     )

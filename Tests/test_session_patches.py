@@ -272,21 +272,21 @@ class TestStagnantSignatureThreshold(unittest.TestCase):
 
 class TestDiscoveryModeSplit(unittest.TestCase):
     """
-    After the incremental-flow patch, a session created with easy_apply_run_mode='normal'
+    After the incremental-flow patch, a session created with easy_apply_run_mode='search'
     must evaluate  ``testing_mode = self._easy_apply_run_mode == "testing"``
-    as False, so normal mode no longer performs aggressive auto-prefill scanning.
+    as False, so search mode no longer performs aggressive auto-prefill scanning.
 
     We cannot call _scan_easy_apply_fields directly (it needs a browser), but we CAN:
       a) confirm the run-mode is stored correctly, and
       b) verify the expression value at the point where testing_mode is computed.
     """
 
-    def test_normal_mode_evaluates_as_testing_mode_false(self):
-        session = _make_session("normal")
+    def test_search_mode_evaluates_as_testing_mode_false(self):
+        session = _make_session("search")
         try:
             # This is the exact expression from _scan_easy_apply_fields
             testing_mode = session._easy_apply_run_mode == "testing"
-            self.assertFalse(testing_mode, "normal mode should be incremental (testing_mode=False)")
+            self.assertFalse(testing_mode, "search mode should be incremental (testing_mode=False)")
         finally:
             _cleanup(session)
 
@@ -298,27 +298,27 @@ class TestDiscoveryModeSplit(unittest.TestCase):
         finally:
             _cleanup(session)
 
-    def test_unknown_mode_falls_back_to_normal_and_is_false(self):
-        """Unknown modes are normalised to 'normal' by __init__, so expression is False."""
+    def test_unknown_mode_falls_back_to_search_and_is_false(self):
+        """Unknown modes are normalised to 'search' by __init__, so expression is False."""
         session = _make_session("foobar")
         try:
-            self.assertEqual(session._easy_apply_run_mode, "normal")
+            self.assertEqual(session._easy_apply_run_mode, "search")
             testing_mode = session._easy_apply_run_mode == "testing"
             self.assertFalse(testing_mode)
         finally:
             _cleanup(session)
 
-    def test_old_unified_expression_would_have_been_true_for_normal(self):
+    def test_old_unified_expression_would_have_been_true_for_search(self):
         """
-        Regression guard: the OLD unified expression treated normal as testing,
+        Regression guard: the OLD unified expression treated search as testing,
         which we no longer want for incremental flow.
         """
-        session = _make_session("normal")
+        session = _make_session("search")
         try:
-            old_expression_result = session._easy_apply_run_mode in {"testing", "normal"}
+            old_expression_result = session._easy_apply_run_mode in {"testing", "search"}
             self.assertTrue(
                 old_expression_result,
-                "Confirms the old unified logic treated normal mode as testing"
+                "Confirms the old unified logic treated search mode as testing"
             )
         finally:
             _cleanup(session)

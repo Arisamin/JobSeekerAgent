@@ -10,10 +10,10 @@ import agent_engine
 
 
 class TestEasyApplyModeParsing(unittest.TestCase):
-    def test_agent_engine_parse_args_defaults_to_normal(self):
+    def test_agent_engine_parse_args_defaults_to_search(self):
         with patch.object(sys, "argv", ["agent_engine.py"]):
             args = agent_engine.parse_args()
-        self.assertEqual(args.easy_apply_run_mode, "normal")
+        self.assertEqual(args.easy_apply_run_mode, "search")
 
     def test_agent_engine_parse_args_accepts_testing(self):
         with patch.object(sys, "argv", ["agent_engine.py", "--easy-apply-run-mode", "testing"]):
@@ -25,10 +25,10 @@ class TestEasyApplyModeParsing(unittest.TestCase):
             args = agoda_runner.parse_args()
         self.assertEqual(args.easy_apply_run_mode, "testing")
 
-    def test_auto_agoda_parse_args_accepts_normal(self):
-        with patch.object(sys, "argv", ["auto_agoda_test_agent.py", "--easy-apply-run-mode", "normal"]):
+    def test_auto_agoda_parse_args_accepts_search(self):
+        with patch.object(sys, "argv", ["auto_agoda_test_agent.py", "--easy-apply-run-mode", "search"]):
             args = agoda_runner.parse_args()
-        self.assertEqual(args.easy_apply_run_mode, "normal")
+        self.assertEqual(args.easy_apply_run_mode, "search")
 
 
 class TestTelegramSessionEasyApplyMode(unittest.TestCase):
@@ -58,9 +58,9 @@ class TestTelegramSessionEasyApplyMode(unittest.TestCase):
         session = self._make_session("testing")
         self.assertEqual(session._easy_apply_run_mode, "testing")
 
-    def test_session_mode_fallbacks_to_normal_for_invalid(self):
+    def test_session_mode_fallbacks_to_search_for_invalid(self):
         session = self._make_session("invalid-mode")
-        self.assertEqual(session._easy_apply_run_mode, "normal")
+        self.assertEqual(session._easy_apply_run_mode, "search")
 
 
 class TestApplyFieldPromptTypes(unittest.TestCase):

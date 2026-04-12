@@ -1269,6 +1269,7 @@ def run_report_mode(args: argparse.Namespace, base_dir: Path) -> None:
         max_run_seconds=args.max_run_seconds,
         max_extract_seconds=args.max_extract_seconds,
         per_card_seconds=args.per_card_seconds,
+        easy_apply_only=args.easy_apply_only,
     )
     try:
         agent.run()
@@ -1402,16 +1403,19 @@ class LinkedInJobAgent:
         max_run_seconds: int,
         max_extract_seconds: int,
         per_card_seconds: int,
+        easy_apply_only: bool = False,
         keep_db_open: bool = False,
     ):
         self.base_dir = base_dir
-        self.max_jobs = max(5, min(max_jobs, 10))
+        self.max_jobs = max(1, int(max_jobs))
         self.headless = headless
         self.query = query
         self.user_data_dir = user_data_dir
         self.max_run_seconds = max(30, max_run_seconds)
-        self.max_extract_seconds = max(15, max_extract_seconds)
+        self.max_extract_seconds = max(0, int(max_extract_seconds))
         self.per_card_seconds = max(5, per_card_seconds)
+        self.easy_apply_only = bool(easy_apply_only)
+        self._search_url_has_easy_apply_filter = False
         self.keep_db_open = keep_db_open
         self.logger = build_logger(base_dir)
         self.db = ProcessedJobsDB(base_dir / "processed_jobs.db")
@@ -1448,13 +1452,17 @@ class LinkedInJobAgent:
     def build_search_url(self) -> str:
         from urllib.parse import quote_plus
 
-        return (
-            "https://www.linkedin.com/jobs/search/"
-            f"?keywords={quote_plus(self.query)}"
-            f"&location={quote_plus('Israel (IL)')}"
-            "&geoId=101620260"
-            "&f_TPR=r86400"
-        )
+        params = [
+            ("keywords", self.query),
+            ("location", "Israel (IL)"),
+            ("geoId", "101620260"),
+            ("f_TPR", "r86400"),
+        ]
+        if self.easy_apply_only:
+            params.append(("f_AL", "true"))
+
+        encoded = "&".join(f"{key}={quote_plus(value)}" for key, value in params)
+        return f"https://www.linkedin.com/jobs/search/?{encoded}"
 
     def _has_auth_wall(self, page: Any) -> bool:
         auth_selectors = [
@@ -1560,6 +1568,50 @@ class LinkedInJobAgent:
                 return ProcessedJobsDB.APPLY_MODE_EXTERNAL
 
         return ProcessedJobsDB.APPLY_MODE_UNKNOWN
+
+    def _should_include_discovered_job(self, apply_mode: str) -> bool:
+        normalized_mode = ProcessedJobsDB.normalize_apply_mode(apply_mode)
+        if not self.easy_apply_only:
+            return True
+        return normalized_mode == ProcessedJobsDB.APPLY_MODE_EASY
+
+    def _card_has_easy_apply_badge(self, card: Any) -> bool:
+        badge_selectors = [
+            "span:has-text('Easy Apply')",
+            "div:has-text('Easy Apply')",
+            "li:has-text('Easy Apply')",
+        ]
+        for selector in badge_selectors:
+            try:
+                if card.locator(selector).count() > 0:
+                    return True
+            except Exception:
+                continue
+        try:
+            text = card.inner_text(timeout=800)
+            return "easy apply" in (text or "").lower()
+        except Exception:
+            return False
+
+    def _finalize_apply_mode_for_discovery(self, detected_mode: str, card: Any, job_url: str) -> str:
+        normalized_mode = ProcessedJobsDB.normalize_apply_mode(detected_mode)
+        if normalized_mode != ProcessedJobsDB.APPLY_MODE_UNKNOWN:
+            return normalized_mode
+        if not (self.easy_apply_only and self._search_url_has_easy_apply_filter):
+            return normalized_mode
+
+        if self._card_has_easy_apply_badge(card):
+            self.log_step(
+                "3.3",
+                f"Coerced apply mode to Easy Apply from card badge in easy-apply-only filtered search: {job_url}",
+            )
+            return ProcessedJobsDB.APPLY_MODE_EASY
+
+        self.log_step(
+            "3.3",
+            f"Coerced apply mode to Easy Apply from search URL filter (f_AL=true): {job_url}",
+        )
+        return ProcessedJobsDB.APPLY_MODE_EASY
 
     def _detect_apply_mode_for_job_url(self, active_page: Any, job_url: str) -> str:
         """Detect apply mode on a URL-scoped probe page for stable per-job classification."""
@@ -1716,6 +1768,52 @@ class LinkedInJobAgent:
             self.log_step("3.9", f"Diagnostics captured: {meta_path}")
         except Exception as exc:
             self.log_step("3.9", f"Failed to capture diagnostics: {exc}")
+
+    def _try_expand_results_feed(self, page: Any, previous_count: int) -> int:
+        """Best-effort nudge to load more search cards in the LinkedIn results feed."""
+        scroll_selectors = [
+            "div.jobs-search-results-list",
+            "div.scaffold-layout__list",
+            "div.scaffold-layout__list-container",
+            "main",
+        ]
+        for selector in scroll_selectors:
+            try:
+                scroller = page.locator(selector).first
+                if scroller.count() < 1:
+                    continue
+                try:
+                    if not scroller.is_visible(timeout=300):
+                        continue
+                except Exception:
+                    pass
+                try:
+                    scroller.evaluate("el => { el.scrollTop = el.scrollHeight; }")
+                except Exception:
+                    continue
+            except Exception:
+                continue
+
+        try:
+            page.mouse.wheel(0, 2400)
+        except Exception:
+            pass
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(1200)
+        except Exception:
+            pass
+
+        refreshed = self._get_cards_locator(page)
+        if refreshed is None:
+            return previous_count
+        try:
+            return refreshed.count()
+        except Exception:
+            return previous_count
 
     def _write_html_report(self) -> Path:
         reports_dir = self.base_dir / "Reports"
@@ -1875,6 +1973,7 @@ class LinkedInJobAgent:
                 "<div class='params-grid'>",
                 f"<div class='param'><strong>Query</strong><br>{html.escape(self.query)}</div>",
                 f"<div class='param'><strong>Headless</strong><br>{html.escape(str(self.headless))}</div>",
+                f"<div class='param'><strong>Easy Apply Only</strong><br>{html.escape(str(self.easy_apply_only))}</div>",
                 f"<div class='param'><strong>Max Jobs</strong><br>{self.max_jobs}</div>",
                 f"<div class='param'><strong>Max Run Seconds</strong><br>{self.max_run_seconds}</div>",
                 f"<div class='param'><strong>Max Extract Seconds</strong><br>{self.max_extract_seconds}</div>",
@@ -1929,9 +2028,13 @@ class LinkedInJobAgent:
     def extract_job_cards(self, page: Any) -> List[JobRecord]:
         sync_api = importlib.import_module("playwright.sync_api")
         playwright_timeout_error = getattr(sync_api, "TimeoutError", Exception)
-        extract_deadline = time.monotonic() + self.max_extract_seconds
+        extract_deadline = (
+            time.monotonic() + self.max_extract_seconds
+            if self.max_extract_seconds > 0
+            else None
+        )
 
-        self.log_step("3.0", "Extracting first job cards and full descriptions")
+        self.log_step("3.0", "Extracting job cards until target new-job count is reached")
         if self._has_auth_wall(page):
             self.log_step("3.0", "Auth wall detected; extraction quality may be limited")
             self._capture_page_diagnostics(page, "auth_wall_detected")
@@ -1945,23 +2048,53 @@ class LinkedInJobAgent:
             self.log_step("3.8", "No job cards found; possible auth wall or changed LinkedIn DOM")
             return []
 
-        total = min(cards_locator.count(), self.max_jobs)
+        target_new_jobs = self.max_jobs
         jobs: List[JobRecord] = []
+        detected_card_verdicts: List[Tuple[str, str, str]] = []
 
-        for index in range(total):
-            if time.monotonic() >= extract_deadline:
+        card_index = 0
+        stagnant_feed_rounds = 0
+        max_stagnant_feed_rounds = 8
+
+        while len(jobs) < target_new_jobs:
+            if extract_deadline is not None and time.monotonic() >= extract_deadline:
                 self.log_step("3.8", f"Extraction deadline reached ({self.max_extract_seconds}s); stopping scan")
                 break
 
-            self.log_step("3.1", f"Opening job card {index + 1}/{total}")
+            cards_locator = self._get_cards_locator(page)
+            if cards_locator is None:
+                self.log_step("3.8", "Card locator disappeared during extraction; stopping")
+                break
+
+            current_count = cards_locator.count()
+            if current_count <= card_index:
+                expanded_count = self._try_expand_results_feed(page, current_count)
+                if expanded_count > current_count:
+                    stagnant_feed_rounds = 0
+                    continue
+
+                stagnant_feed_rounds += 1
+                if stagnant_feed_rounds >= max_stagnant_feed_rounds:
+                    self.log_step(
+                        "3.8",
+                        f"Result feed appears exhausted after probing {card_index} cards; stopping",
+                    )
+                    break
+                continue
+
+            stagnant_feed_rounds = 0
+            self.log_step(
+                "3.1",
+                f"Opening job card {card_index + 1}/{current_count} (captured this run: {len(jobs)}/{target_new_jobs})",
+            )
             card_deadline = time.monotonic() + self.per_card_seconds
             try:
                 cards_locator = self._get_cards_locator(page)
-                if cards_locator is None or cards_locator.count() <= index:
-                    self.log_step("3.5", f"Card list changed before index {index + 1}; stopping early")
-                    break
+                if cards_locator is None or cards_locator.count() <= card_index:
+                    self.log_step("3.5", f"Card list changed before index {card_index + 1}; trying to continue")
+                    continue
 
-                card = cards_locator.nth(index)
+                card = cards_locator.nth(card_index)
 
                 try:
                     card.scroll_into_view_if_needed(timeout=2500)
@@ -1975,12 +2108,12 @@ class LinkedInJobAgent:
                     card.click(timeout=3500)
                 remaining_budget = card_deadline - time.monotonic() - 0.75
                 if remaining_budget <= 0:
-                    self.log_step("3.5", f"Per-card deadline reached on card {index + 1}; continuing")
+                    self.log_step("3.5", f"Per-card deadline reached on card {card_index + 1}; continuing")
                     continue
                 self.jitter("3.2", max_delay=min(1.2, remaining_budget))
 
                 if time.monotonic() >= card_deadline:
-                    self.log_step("3.5", f"Per-card deadline reached on card {index + 1}; continuing")
+                    self.log_step("3.5", f"Per-card deadline reached on card {card_index + 1}; continuing")
                     continue
 
                 self._expand_job_description(page)
@@ -2051,7 +2184,7 @@ class LinkedInJobAgent:
                 )
 
                 if not description:
-                    self.log_step("3.5", f"No description content for card {index + 1}; continuing")
+                    self.log_step("3.5", f"No description content for card {card_index + 1}; continuing")
                     continue
 
                 job_url = page.url
@@ -2075,17 +2208,26 @@ class LinkedInJobAgent:
                     company = "Unknown company"
 
                 if title == "Unknown title" or company == "Unknown company":
-                    self.log_step("3.5", f"Skipping low-quality card {index + 1}: missing title/company")
+                    self.log_step("3.5", f"Skipping low-quality card {card_index + 1}: missing title/company")
                     continue
 
                 job_url = self._canonicalize_job_url(job_url)
                 if not job_url:
-                    self.log_step("3.5", f"Skipping card {index + 1}: missing job URL")
+                    self.log_step("3.5", f"Skipping card {card_index + 1}: missing job URL")
                     continue
 
                 key_source = f"{title}|{company}|{job_url}"
                 job_key = hashlib.sha256(key_source.encode("utf-8")).hexdigest()
                 apply_mode = self._detect_apply_mode_for_job_url(page, job_url)
+                apply_mode = self._finalize_apply_mode_for_discovery(apply_mode, card, job_url)
+                detected_card_verdicts.append((company, job_url, apply_mode))
+
+                if not self._should_include_discovered_job(apply_mode):
+                    self.log_step(
+                        "3.3",
+                        f"Filtered non-Easy-Apply job in easy-apply-only mode: {title} @ {company} (apply mode: {apply_mode})",
+                    )
+                    continue
 
                 if self.db.seen(job_key):
                     self.db.upsert_job_metadata(job_key=job_key, apply_mode=apply_mode)
@@ -2108,14 +2250,26 @@ class LinkedInJobAgent:
                 jobs.append(job)
                 self.log_step("3.4", f"Captured new job: {title} @ {company} (apply mode: {apply_mode})")
 
+                if len(jobs) >= target_new_jobs:
+                    self.log_step("3.7", f"Reached target of {target_new_jobs} new jobs in this run")
+                    break
+
                 if time.monotonic() >= card_deadline:
-                    self.log_step("3.5", f"Per-card deadline reached after capture for card {index + 1}")
+                    self.log_step("3.5", f"Per-card deadline reached after capture for card {card_index + 1}")
             except playwright_timeout_error:
-                self.log_step("3.5", f"Timeout extracting card {index + 1}; continuing")
+                self.log_step("3.5", f"Timeout extracting card {card_index + 1}; continuing")
             except Exception as exc:
-                self.log_step("3.6", f"Extraction error on card {index + 1}: {exc}")
+                self.log_step("3.6", f"Extraction error on card {card_index + 1}: {exc}")
+            finally:
+                card_index += 1
 
         self.log_step("3.7", f"Extracted {len(jobs)} new jobs")
+        if detected_card_verdicts:
+            self.log_step("3.9", "Numbered detected job card verdicts:")
+            for index, (company, url, verdict) in enumerate(detected_card_verdicts, start=1):
+                self.log_step("3.9", f"{index}. {company} | {url} | {verdict}")
+        else:
+            self.log_step("3.9", "No detectable job cards produced a verdict in this scan")
         return jobs
 
     def report_job(self, job: JobRecord) -> None:
@@ -2206,6 +2360,8 @@ class LinkedInJobAgent:
                 page = context.pages[0] if context.pages else context.new_page()
                 page.set_default_timeout(min(5000, self.per_card_seconds * 1000))
                 search_url = self.build_search_url()
+                self._search_url_has_easy_apply_filter = "f_al=true" in search_url.lower()
+                self.log_step("2.1", f"Search URL: {search_url}")
                 self.log_step("2.1", f"Navigating to LinkedIn search: {search_url}")
                 page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
                 # Wait for page to fully load (job cards to render)
@@ -2384,7 +2540,7 @@ class TelegramJobSession:
         new_jobs: List[Dict],
         query: str,
         logger: logging.Logger,
-        easy_apply_run_mode: str = "normal",
+        easy_apply_run_mode: str = "search",
     ):
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -2422,8 +2578,8 @@ class TelegramJobSession:
             else self.db.db_path.parent / self.PROFILE_FILENAME
         )
         self._saved_profile: Dict[str, str] = self._load_saved_profile()
-        mode = (easy_apply_run_mode or "normal").strip().lower()
-        self._easy_apply_run_mode = mode if mode in {"normal", "testing"} else "normal"
+        mode = (easy_apply_run_mode or "search").strip().lower()
+        self._easy_apply_run_mode = mode if mode in {"search", "testing"} else "search"
 
     @staticmethod
     def _classify_apply_flow_transition(
@@ -4651,6 +4807,7 @@ class TelegramJobSession:
         company = html.escape(job.get("company") or "Unknown")
         url     = job.get("url") or ""
         status  = html.escape(job.get("status") or "Discovered")
+        recommendation = html.escape(str(job.get("recommendation") or "Unknown"))
         raw_mode = str(job.get("apply_mode") or ProcessedJobsDB.APPLY_MODE_UNKNOWN)
         apply_mode = ProcessedJobsDB.normalize_apply_mode(raw_mode)
         apply_icon = "⚡" if apply_mode == ProcessedJobsDB.APPLY_MODE_EASY else "🌐" if apply_mode == ProcessedJobsDB.APPLY_MODE_EXTERNAL else "❔"
@@ -4660,6 +4817,7 @@ class TelegramJobSession:
             f"<b>{title}</b>\n"
             f"🏢 {company}\n"
             f"📌 Status: {status}\n"
+            f"🧠 Recommendation: {recommendation}\n"
             f"{apply_icon} Apply Mode: {html.escape(apply_mode)}\n"
             f'🔗 <a href="{url}">{url}</a>\n\n'
             "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b>"
@@ -4670,6 +4828,7 @@ class TelegramJobSession:
         company = html.escape(job.get("company") or "Unknown")
         url     = job.get("url") or ""
         status  = html.escape(job.get("status") or "")
+        recommendation = html.escape(str(job.get("recommendation") or "Unknown"))
         raw_mode = str(job.get("apply_mode") or ProcessedJobsDB.APPLY_MODE_UNKNOWN)
         apply_mode = ProcessedJobsDB.normalize_apply_mode(raw_mode)
         apply_icon = "⚡" if apply_mode == ProcessedJobsDB.APPLY_MODE_EASY else "🌐" if apply_mode == ProcessedJobsDB.APPLY_MODE_EXTERNAL else "❔"
@@ -4679,6 +4838,7 @@ class TelegramJobSession:
             f"<b>{title}</b>\n"
             f"🏢 {company}\n"
             f"📌 Status: {status}\n"
+            f"🧠 Recommendation: {recommendation}\n"
             f"{apply_icon} Apply Mode: {html.escape(apply_mode)}\n"
             f'🔗 <a href="{url}">{url}</a>\n\n'
             "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b>"
@@ -4884,7 +5044,7 @@ class TelegramJobSession:
 
         scanned: List[Tuple[str, str, str]] = []
         self._apply_scan_unverified = False
-        if self._easy_apply_run_mode == "normal":
+        if self._easy_apply_run_mode == "search":
             self._send(
                 f"🧭 Starting incremental apply flow for <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>.\n"
                 "I'll ask required fields step by step and discover additional questions based on your answers."
@@ -5082,7 +5242,7 @@ class TelegramJobSession:
             break
 
         current_job_url = (self._current_job or {}).get("url", "")
-        if self._easy_apply_run_mode == "normal" and current_job_url:
+        if self._easy_apply_run_mode == "search" and current_job_url:
             if self._maybe_expand_apply_fields_via_rescan(current_job_url):
                 self._send_current_apply_prompt()
                 return True
@@ -5099,10 +5259,10 @@ class TelegramJobSession:
 
     def _maybe_expand_apply_fields_via_rescan(self, job_url: str) -> bool:
         """
-        In normal mode, re-scan the wizard using answers collected so far.
+        In search mode, re-scan the wizard using answers collected so far.
         If new fields are discovered, append them and continue Q&A.
         """
-        if self._easy_apply_run_mode != "normal":
+        if self._easy_apply_run_mode != "search":
             return False
         if not job_url:
             return False
@@ -5633,7 +5793,7 @@ class TelegramJobSession:
         local_app_data = _os.environ.get("LOCALAPPDATA", "")
         primary_profile = _os.path.join(local_app_data, "Google", "Chrome", "User Data") if local_app_data else ""
         fallback_profile = str(Path(__file__).parent / ".playwright_profile")
-        easy_apply_headless = False if force_headed else (self._easy_apply_run_mode == "normal")
+        easy_apply_headless = False if force_headed else (self._easy_apply_run_mode == "search")
 
         cv_path = answers.get("cv_path", "").strip()
         browser_seen: Dict[str, Tuple[str, str]] = {}
@@ -6639,7 +6799,7 @@ def run_telegram_notify(
     logger: logging.Logger,
     bot_token: Optional[str] = None,
     chat_id: Optional[int] = None,
-    easy_apply_run_mode: str = "normal",
+    easy_apply_run_mode: str = "search",
 ) -> None:
     """
     Start an interactive Telegram session.  Reads BOT_TOKEN and CHAT_ID from
@@ -6684,7 +6844,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Delete processed_jobs.db and sqlite sidecars before running",
     )
-    parser.add_argument("--max-jobs", type=int, default=8, help="How many jobs to inspect (5-10)")
+    parser.add_argument("--max-jobs", type=int, default=8, help="Target number of new jobs to add to DB in this run")
     parser.add_argument(
         "--query",
         type=str,
@@ -6706,8 +6866,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-extract-seconds",
         type=int,
-        default=90,
-        help="Hard deadline for extraction phase",
+        default=0,
+        help="Hard deadline for extraction phase in seconds (0 = no deadline)",
     )
     parser.add_argument(
         "--per-card-seconds",
@@ -6758,6 +6918,11 @@ def parse_args() -> argparse.Namespace:
         help="One-step mode: run scan once, then open report update page",
     )
     parser.add_argument(
+        "--easy-apply-only",
+        action="store_true",
+        help="Discover only jobs classified as Easy Apply during search",
+    )
+    parser.add_argument(
         "--telegram-notify",
         action="store_true",
         help=(
@@ -6780,9 +6945,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--easy-apply-run-mode",
         type=str,
-        choices=["normal", "testing"],
-        default="normal",
-        help="Easy Apply scan traversal mode: normal or testing",
+        choices=["search", "testing"],
+        default="search",
+        help="Easy Apply scan traversal mode: search or testing",
     )
     return parser.parse_args()
 
@@ -6861,6 +7026,7 @@ def main() -> None:
         max_run_seconds=args.max_run_seconds,
         max_extract_seconds=args.max_extract_seconds,
         per_card_seconds=args.per_card_seconds,
+        easy_apply_only=args.easy_apply_only,
         keep_db_open=args.telegram_notify,
     )
     agent.run()

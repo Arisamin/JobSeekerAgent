@@ -1,41 +1,25 @@
 {
   "chat_profiles": {
-    "1": {
-      "experience_years": "30"
-    },
     "6128016116": {
       "cv_path": "C:\\MyData\\Ariel CV - 2026 [2].pdf",
-      "full_name": "Aba Guba",
-      "email": "avram@gmail.com",
-      "phone": "0556745678",
-      "location": "jebalya",
-      "linkedin": "https://www.linkedin.com/in/ariel-samin-58a57b22/",
-      "experience_years": "60",
-      "notice_period": "1 month",
-      "salary_expectation": "30000",
-      "motivation": "I am happy",
       "cover_letter_path": "C:\\MyData\\Ariel CV - 2026 [2].pdf",
-      "github": "http://www.github.com/moshe",
-      "website": "http://www.github.com/moshe",
-      "relocate_bangkok": "Yes",
-      "agoda_relationship": "No",
-      "agoda_booking_holdings_group_employment": "Yes",
-      "custom__how_did_you_hear_about_this_job__how_did_you__69e3cd25aa": "Direct to Careers at Agoda",
-      "custom__in_which_country_region_are_you_currently_ba__d0c0679049": "Israel",
-      "custom__are_you_currently_based_in_bangkok_or_open_t__b49d3118b9": "No",
-      "custom__do_you_as_a_candidate_have_a_personal_relati__55a3b79aa8": "No",
-      "custom__do_you_agree_to_agoda_s_use_of_personal_data__83fef6a287": "No",
-      "custom__are_you_presently_employed_by_any_company_wi__a90bc7d8f1": "No",
-      "custom__have_you_read_our_engineering_blog___https__364f37390d": "No",
-      "custom__have_you_applied_to_agoda_in_the_past_6_mont__45d617b7a0": "No",
-      "custom__do_you_allow_us_to_provide_you_text_sms_upda__fd61404bae": "No",
-      "custom__follow_agoda_to_stay_up_to_date_with_their_p__59c9ed1068": "No",
-      "custom__additional_information__9872db237b": "kachapoopoo",
-      "custom__select__e9e4443d4f": "I have a family member working at Mobileye",
-      "custom__no__position_isn_t_relevant_for_me__2ee79e99b3": "yes",
-      "custom__submit_your_application__ec318ac1ad": "What?",
-      "custom__links__379e75c850": "Http://1.org.il",
-      "custom__this_question_is_asked_for_the_purpose_of_en__a2340e8a9c": "Non-binary"
+      "full_name": "Abu Gabi",
+      "email": "baba.guba@gmail.com",
+      "phone": "050-8008008",
+      "location": "Mugamba",
+      "linkedin": "https://www.linkedin.com/jobs/view/4366001366/",
+      "github": "https://github.com/settings/billing",
+      "motivation": "My cover letter is C",
+      "custom__what_is_your_gender___optional__aa1b2b7ecd": "Non-binary",
+      "custom__the_position_is_located_in_jerusalem_and_req__502883fc08": "No, position isn't relevant for me",
+      "custom__we_kindly_request_that_you_make_us_aware_if__bb12513460": "I have a family member working at Mobileye",
+      "custom__yes__mobileye_can_contact_me_about_future_jo__bb50065bcc": "No",
+      "custom__family_member_working_at_mobileye__36d419ce0f": "I don't have any family member working at Mobileye",
+      "custom__yes__mobileye_can_contact_me_about_future_jo__f6a41ae855": "Yes",
+      "custom__current_company__db10dfaa7c": "babuna",
+      "custom__your_full_linkedin_profile_will_be__8abbffc0a7": "ok",
+      "custom__linkedin_profile__4661a6e4c0": "Skip",
+      "custom__shared__learn_more__d391ec50af": "say what"
     }
   }
 }

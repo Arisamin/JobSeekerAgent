@@ -22,7 +22,7 @@ class TestRunnerProcessCleanupContract(unittest.TestCase):
         self.assertIn("Cleanup: stopped launched agent_engine.py PIDs", script)
 
     def test_bat_launcher_has_baseline_snapshot_and_cleanup(self):
-        script = (ROOT / "Start_Agent_Normal_Mode.bat").read_text(encoding="utf-8")
+        script = (ROOT / "Start_Agent_Search_Mode.bat").read_text(encoding="utf-8")
 
         self.assertIn('set "BASELINE_AGENT_PIDS="', script)
         self.assertIn("BASELINE_AGENT_PIDS", script)
