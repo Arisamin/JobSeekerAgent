@@ -3161,6 +3161,7 @@ class TelegramJobSession:
         discovered_options: Dict[str, List[str]] = {}
         seen_keys: set = set()
         seen_field_signatures: set = set()
+        signature_to_key: Dict[Tuple[str, str], str] = {}
         seen_card_template_payload_ids: set = set()
         synthetic_scan_files: Dict[str, str] = {}
 
@@ -3358,6 +3359,12 @@ class TelegramJobSession:
 
         def _profile_key_for(label: str) -> Optional[str]:
             label_lower = label.lower()
+
+            # Phone country code must remain a dedicated custom field; mapping it
+            # to the generic phone key creates unstable duplicate keys across scans.
+            if "phone country code" in label_lower:
+                return None
+
             for pattern, key in self.LABEL_TO_PROFILE_KEY:
                 if pattern.search(label_lower):
                     # Do not collapse skill-specific experience questions
@@ -3552,27 +3559,36 @@ class TelegramJobSession:
                     elif "متابعة" in display_label or "إطلاع" in display_label:
                         display_label = "Follow Confidential to stay up to date with their page."
 
+            canonical_label = self._canonicalize_apply_label(display_label) or normalize_form_label(display_label or "")
+            if not canonical_label:
+                return
+
             signature = (
-                (key or "").strip().lower(),
-                normalize_form_label(display_label or "").lower(),
+                canonical_label.lower(),
                 normalized_type,
             )
+            existing_key = signature_to_key.get(signature)
+            if existing_key:
+                _merge_options(existing_key, options or [])
+                return
+
             if signature in seen_field_signatures:
                 _merge_options(key, options or [])
                 return
 
             resolved_key = key
             if resolved_key in seen_keys:
-                base_key = key if key.startswith("custom__") else self._custom_key_from_label(display_label)
+                base_key = key if key.startswith("custom__") else self._custom_key_from_label(canonical_label)
                 suffix = 2
                 while f"{base_key}__dup{suffix}" in seen_keys:
                     suffix += 1
                 resolved_key = f"{base_key}__dup{suffix}"
 
             seen_field_signatures.add(signature)
+            signature_to_key[signature] = resolved_key
             seen_keys.add(resolved_key)
             _merge_options(resolved_key, options or [])
-            discovered.append((resolved_key, display_label, normalized_type))
+            discovered.append((resolved_key, canonical_label, normalized_type))
 
         def _disambiguate_generic_key(key: str, label: str, source_hint: str) -> str:
             if not key.startswith("custom__"):
@@ -5321,6 +5337,26 @@ class TelegramJobSession:
             self._apply_field_types = {}
             fixed_keys = set()
 
+        option_field_types = {"radio", "checkbox", "select", "action"}
+        options_by_canonical_label: Dict[str, List[str]] = {}
+
+        for scan_key, scan_label, scan_ftype in scanned:
+            if (scan_ftype or "").strip().lower() not in option_field_types:
+                continue
+            seed_options = list(self._apply_field_options.get(scan_key, []) or [])
+            if not seed_options:
+                continue
+            canonical_seed = (
+                self._canonicalize_apply_label(scan_label)
+                or normalize_form_label(scan_label or "")
+            ).lower()
+            if not canonical_seed:
+                continue
+            existing_seed = options_by_canonical_label.setdefault(canonical_seed, [])
+            for opt in seed_options:
+                if not any(existing.lower() == (opt or "").lower() for existing in existing_seed):
+                    existing_seed.append(opt)
+
         def _contains_arabic(text: str) -> bool:
             return bool(re.search(r"[\u0600-\u06FF]", text or ""))
 
@@ -5346,10 +5382,24 @@ class TelegramJobSession:
                 continue
             if is_disclaimer_label(label):
                 continue
-            options = self._apply_field_options.get(key, [])
+            normalized_ftype = (ftype or "").strip().lower()
+            clean_label = self._canonicalize_apply_label(label) or label or key
+            canonical_label_key = normalize_form_label(clean_label).lower()
+
+            options = list(self._apply_field_options.get(key, []) or [])
+            if not options and normalized_ftype in option_field_types and canonical_label_key:
+                fallback_options = options_by_canonical_label.get(canonical_label_key, [])
+                if fallback_options:
+                    options = list(fallback_options)
+                    self._apply_field_options[key] = options
+
+            if options and normalized_ftype in option_field_types and canonical_label_key:
+                canonical_bucket = options_by_canonical_label.setdefault(canonical_label_key, [])
+                for opt in options:
+                    if not any(existing.lower() == (opt or "").lower() for existing in canonical_bucket):
+                        canonical_bucket.append(opt)
 
             self._apply_field_types[key] = ftype
-            clean_label = self._canonicalize_apply_label(label) or label or key
             self._apply_field_labels[key] = clean_label
             # Build a prompt from the label and field type
             if not options and ftype in {"radio", "checkbox"} and key in {
@@ -5538,78 +5588,52 @@ class TelegramJobSession:
 
         answer = (user_input or "").strip()
         if not answer:
-            self._send("⚠️ Empty input. Please send a substring from one of the options.")
+            self._send("⚠️ Empty input. Send an option number, or send text to filter the options list.")
             return False, ""
 
-        phase = str(state.get("phase") or "await_substring")
-        visible_options: List[str] = list(state.get("visible_options") or [])
-        if not visible_options:
-            visible_options = options[:20]
-            state["visible_options"] = visible_options
+        candidate_indices: List[int] = list(state.get("candidate_indices") or [])
+        if not candidate_indices:
+            candidate_indices = list(range(len(options)))
+            state["candidate_indices"] = candidate_indices
             self._option_resolution_state = state
 
-        if phase == "await_pick":
-            matches: List[str] = list(state.get("matches") or [])
-            if answer.isdigit():
-                idx = int(answer) - 1
-                if 0 <= idx < len(matches):
-                    selected = matches[idx]
-                    self._option_resolution_state = None
-                    return True, selected
-                self._send(
-                    f"⚠️ Invalid option number. Choose 1-{len(matches)}, send full option text, "
-                    "or send another filter substring."
-                )
-                return False, ""
-            exact = self._match_option_exact(answer, matches)
-            if exact:
-                self._option_resolution_state = None
-                return True, exact
-            state["phase"] = "await_substring"
-            self._option_resolution_state = state
-
-        # await_substring
         if answer.isdigit():
-            idx = int(answer) - 1
-            if 0 <= idx < len(visible_options):
-                selected = visible_options[idx]
+            num = int(answer)
+            idx = num - 1
+            if 0 <= idx < len(options):
+                selected = options[idx]
                 self._option_resolution_state = None
                 return True, selected
             self._send(
-                f"⚠️ Invalid option number. Choose 1-{len(visible_options)}, send full option text, "
-                "or send a filter substring."
+                f"⚠️ Invalid option number. Choose 1-{len(options)} based on the shown option numbers, "
+                "or send text to filter further."
             )
             return False, ""
 
-        exact = self._match_option_exact(answer, options)
-        if exact:
-            self._option_resolution_state = None
-            return True, exact
-
-        matches = self._find_option_matches(answer, options)
+        matches = [
+            idx
+            for idx in candidate_indices
+            if normalize_form_label(answer).lower()
+            in normalize_form_label(options[idx] or "").lower()
+        ]
         if not matches:
             self._send("⚠️ No options matched that substring. Send another substring.")
             return False, ""
 
-        if len(matches) == 1:
-            self._option_resolution_state = None
-            return True, matches[0]
-
         max_show = 20
         visible_matches = matches[:max_show]
-        lines = [f"{i + 1}) {html.escape(opt)}" for i, opt in enumerate(visible_matches)]
+        lines = [f"{idx + 1}) {html.escape(options[idx])}" for idx in visible_matches]
         tail = ""
         if len(matches) > max_show:
             tail = f"\n... and {len(matches) - max_show} more match(es). Send a narrower substring if needed."
-        state["phase"] = "await_pick"
-        state["matches"] = visible_matches
-        state["visible_options"] = visible_matches
+        state["candidate_indices"] = matches
         self._option_resolution_state = state
         self._send(
             "🔎 Filtered options matching your text:\n"
-            "Reply with an option number, the full option text, or another filter substring:\n"
+            "Reply with an option number to choose, or send another substring to filter further.\n"
             + "\n".join(lines)
             + tail
+            + "\nOnly a numbered reply finalizes this answer."
         )
         return False, ""
 
@@ -5622,19 +5646,16 @@ class TelegramJobSession:
         ftype = self._apply_field_types.get(key, "")
         options = self._apply_field_options.get(key, [])
         if options and ftype in {"radio", "checkbox", "select", "action"}:
-            visible_options = list(options[:20])
             self._option_resolution_state = {
                 "field_key": key,
-                "phase": "await_substring",
                 "options": options,
-                "visible_options": visible_options,
-                "matches": [],
-                "selected": "",
+                "candidate_indices": list(range(len(options))),
             }
             self._send(
                 prompt
                 + "\n\n"
-                + "🔎 Protocol: choose by number, send the full option text, or send a substring to filter options."
+                + "🔎 Protocol: reply with an option number, or send text to filter. "
+                + "Only a numbered reply finalizes this answer."
             )
             return
         self._option_resolution_state = None
@@ -5660,6 +5681,13 @@ class TelegramJobSession:
                 if lowered == option.lower():
                     return True, "", option
             return False, "⚠️ Selection not recognized. Send a substring from a valid option.", ""
+
+        normalized_label = normalize_form_label(self._apply_field_labels.get(field_key, "")).lower()
+        if ftype == "select" and not options and "phone country code" in normalized_label:
+            normalized_answer = normalize_form_label(answer)
+            if len(normalized_answer) < 5:
+                return False, "⚠️ Please provide the full phone country option text (for example: Israel (+972)).", ""
+            return True, "", normalized_answer
 
         if field_key == "cv_path":
             candidate = Path(answer)
@@ -6386,7 +6414,7 @@ class TelegramJobSession:
 
         # Some DOM variants duplicate the same long sentence twice.
         words = text.split()
-        if len(words) >= 10 and len(words) % 2 == 0:
+        if len(words) >= 2 and len(words) % 2 == 0:
             half = len(words) // 2
             left = " ".join(words[:half]).strip().lower()
             right = " ".join(words[half:]).strip().lower()
@@ -6523,15 +6551,46 @@ class TelegramJobSession:
         company = job.get("company", "?")
         url = job.get("url", "")
 
-        submission_lines: List[str] = []
-        for idx, (field_key, prompt) in enumerate(self._apply_form_fields, 1):
+        def _answer_quality_score(raw_value: str, field_options: List[str]) -> int:
+            value = (raw_value or "").strip()
+            if not value:
+                return 0
+            if field_options:
+                return 3 if self._match_option_exact(value, field_options) else 1
+            return 2
+
+        dedupe_order: List[Tuple[str, str]] = []
+        deduped_rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+        for field_key, prompt in self._apply_form_fields:
             value = (self._apply_answers.get(field_key) or "").strip()
             label = self._apply_field_labels.get(field_key, "")
             if not label:
                 label = prompt.split(" ", 1)[1].rstrip(":") if " " in prompt else prompt.rstrip(":")
                 label = label.split(" (", 1)[0].strip()
-            display_value = value or "(not provided)"
-            submission_lines.append(f"• Q{idx}: <b>{html.escape(label)}</b>: {html.escape(display_value)}")
+
+            normalized_type = (self._apply_field_types.get(field_key, "") or "").strip().lower()
+            canonical_label = self._canonicalize_apply_label(label) or normalize_form_label(label)
+            dedupe_key = (canonical_label.lower(), normalized_type)
+
+            if dedupe_key not in deduped_rows:
+                dedupe_order.append(dedupe_key)
+
+            candidate_score = _answer_quality_score(value, self._apply_field_options.get(field_key, []))
+            existing = deduped_rows.get(dedupe_key)
+            if existing is None or candidate_score > int(existing.get("score", 0)):
+                deduped_rows[dedupe_key] = {
+                    "label": canonical_label or label,
+                    "value": value,
+                    "score": candidate_score,
+                }
+
+        submission_lines: List[str] = []
+        for idx, dedupe_key in enumerate(dedupe_order, 1):
+            row = deduped_rows.get(dedupe_key, {})
+            display_label = str(row.get("label") or "")
+            display_value = str(row.get("value") or "").strip() or "(not provided)"
+            submission_lines.append(f"• Q{idx}: <b>{html.escape(display_label)}</b>: {html.escape(display_value)}")
 
         submission_section = "\n🧾 <b>Scraped Easy Apply fields and values:</b>\n"
         if submission_lines:

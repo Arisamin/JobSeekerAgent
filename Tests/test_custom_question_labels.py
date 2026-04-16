@@ -112,6 +112,49 @@ class TestCustomQuestionLabels(unittest.TestCase):
         self.assertIn("(not provided)", summary)
         self.assertEqual(summary.count("• Q"), 2)
 
+    def test_apply_summary_dedupes_identical_labels_and_prefers_valid_option_value(self):
+        session = self._make_session()
+        key_a = session._custom_key_from_label("Phone country code Phone country code")
+        key_b = session._custom_key_from_label("Phone country code")
+
+        session._current_job = {
+            "title": "Senior Backend Engineer",
+            "company": "Confidential",
+            "url": "https://www.linkedin.com/jobs/view/4400959935/",
+        }
+        session._apply_form_fields = [
+            (key_a, "prompt-a"),
+            (key_b, "prompt-b"),
+        ]
+        session._apply_field_labels = {
+            key_a: "Phone country code Phone country code",
+            key_b: "Phone country code",
+        }
+        session._apply_field_types = {
+            key_a: "select",
+            key_b: "select",
+        }
+        session._apply_field_options = {
+            key_a: ["Israel (+972)", "United States (+1)"],
+        }
+        session._apply_answers = {
+            key_a: "Israel (+972)",
+            key_b: "Isr",
+        }
+        session._apply_asked_field_keys = []
+
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+
+        keep_going = session._show_apply_summary()
+
+        self.assertTrue(keep_going)
+        self.assertTrue(sent_messages)
+        summary = sent_messages[-1]
+        self.assertEqual(summary.count("Phone country code"), 1)
+        self.assertIn("Israel (+972)", summary)
+        self.assertNotIn("<b>Phone country code</b>: Isr\n", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,6 +187,13 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
             ),
         )
 
+    def test_canonicalize_apply_label_collapses_short_duplicate_halves(self):
+        session = self._make_session()
+        self.assertEqual(
+            "Phone country code",
+            session._canonicalize_apply_label("Phone country code Phone country code"),
+        )
+
     def test_build_apply_form_fields_truncates_displayed_options_for_large_select(self):
         session = self._make_session()
         many_options = [f"Country {i}" for i in range(1, 60)]
@@ -201,6 +208,54 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertIn("20) Country 20", prompt)
         self.assertNotIn("21) Country 21", prompt)
         self.assertIn("more option(s) not shown", prompt)
+
+    def test_build_fields_reuses_options_for_duplicate_canonical_label(self):
+        session = self._make_session()
+        long_key = "custom__phone_country_long"
+        short_key = "custom__phone_country_short"
+        session._apply_field_options = {
+            long_key: ["Israel (+972)", "United States (+1)"],
+        }
+
+        fields = session._build_apply_form_fields(
+            [
+                (long_key, "Phone country code Phone country code", "select"),
+                (short_key, "Phone country code", "select"),
+            ],
+            include_fixed_fields=False,
+        )
+        prompts_by_key = {key: prompt for key, prompt in fields}
+
+        self.assertIn("1) Israel (+972)", prompts_by_key[short_key])
+        self.assertIn("2) United States (+1)", prompts_by_key[short_key])
+        self.assertEqual(
+            ["Israel (+972)", "United States (+1)"],
+            session._apply_field_options.get(short_key),
+        )
+
+    def test_prune_invalid_prefill_for_duplicate_phone_country_label(self):
+        session = self._make_session()
+        session._persist_saved_profile = lambda: None
+        long_key = "custom__phone_country_long"
+        short_key = "custom__phone_country_short"
+        session._apply_field_options = {
+            long_key: ["Israel (+972)", "United States (+1)"],
+        }
+        session._apply_form_fields = session._build_apply_form_fields(
+            [
+                (long_key, "Phone country code Phone country code", "select"),
+                (short_key, "Phone country code", "select"),
+            ],
+            include_fixed_fields=False,
+        )
+        session._apply_answers = {short_key: "Isr"}
+        session._saved_profile = {short_key: "Isr"}
+
+        invalid_labels = session._prune_invalid_prefilled_option_answers()
+
+        self.assertIn("Phone country code", invalid_labels)
+        self.assertNotIn(short_key, session._apply_answers)
+        self.assertNotIn(short_key, session._saved_profile)
 
     def test_validate_apply_answer_rejects_unknown_free_text_for_select(self):
         session = self._make_session()
@@ -307,7 +362,7 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         resolved = session._resolve_apply_answer(label, answers)
         self.assertEqual(resolved, "8")
 
-    def test_option_resolution_accepts_exact_match_without_confirm(self):
+    def test_option_resolution_requires_number_even_when_filter_has_single_match(self):
         session = self._make_session()
         sent_messages = []
         session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
@@ -327,6 +382,10 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         session._send_current_apply_prompt()
         session._handle_apply_answer("Albania")
 
+        self.assertIsNone(session._apply_answers.get("custom__country"))
+        self.assertIn("Only a numbered reply finalizes", sent_messages[-1])
+
+        session._handle_apply_answer("2")
         self.assertEqual(session._apply_answers.get("custom__country"), "Albania")
         self.assertEqual(session._apply_question_idx, 1)
 
@@ -345,9 +404,9 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         session._apply_field_types = {"custom__location": "select", "full_name": "text"}
         session._apply_field_options = {
             "custom__location": [
+                "Tel Aviv, Israel",
                 "Bangkok, Thailand",
                 "Bangalore, India",
-                "Tel Aviv, Israel",
             ]
         }
         session._apply_answers = {}
@@ -356,8 +415,9 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         session._send_current_apply_prompt()
         session._handle_apply_answer("Bang")
 
-        self.assertEqual(session._option_resolution_state.get("phase"), "await_pick")
-        session._handle_apply_answer("2")
+        self.assertIn("2) Bangkok, Thailand", sent_messages[-1])
+        self.assertIn("3) Bangalore, India", sent_messages[-1])
+        session._handle_apply_answer("3")
 
         self.assertEqual(session._apply_answers.get("custom__location"), "Bangalore, India")
         self.assertEqual(session._apply_question_idx, 1)

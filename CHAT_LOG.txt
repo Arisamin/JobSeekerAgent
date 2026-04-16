@@ -1,4 +1,55 @@
 [Copilot] 2026-04-16
+- Investigated persistent manual-run failures from Logs/run_20260416_215907.log.
+- Confirmed two active issues from latest runtime evidence:
+  - Duplicate summary row still present for "Do you have experience as system/ Lead Developer in start-ups?".
+  - Option protocol for predefined select fields still allowed string flow to auto-advance instead of requiring numeric confirmation.
+- Implemented fixes:
+  - Option protocol rewritten so only numbered replies finalize a select/radio/checkbox/action answer.
+  - Filtered option lists now preserve original option numbering (no re-numbering in filtered views).
+  - String replies now only filter candidate sets; even single-match filters require numbered confirmation.
+  - Phone country code mapping stabilized in scanner (`_profile_key_for`) to avoid generic-phone key collision that caused unstable duplicate keys.
+- Validation evidence after this patch set:
+  - Focused regressions: 62 passed.
+  - Full suite: 157 passed.
+  - Live confidential parity e2e: 1 passed.
+
+[User] 2026-04-16
+- Reported issues still persist after previous patch:
+  - Duplicate summary row for system/Lead Developer question.
+  - Phone country code filter-string flow advanced incorrectly.
+  - Requested strict predefined-option protocol where only numeric selection ends the flow, with filtered lists preserving original numbering.
+
+[Copilot] 2026-04-16
+- Completed your requested ordering of actions:
+  - Created checkpoint commit before further debugging.
+  - Commit: b8fa140
+  - Message: "Checkpoint: all Easy Apply questions discovered; summary still dirty and predefined-option chat protocol still broken"
+- Investigated latest manual-run evidence from Logs/run_20260416_112432.log.
+- Root causes confirmed:
+  - Summary showed duplicate canonical questions (same logical field surfaced from different scan variants).
+  - A duplicate Phone country code field could keep stale partial text ("Isr") when one variant lacked options.
+- Corrective measures implemented:
+  - Tightened scan-time duplicate suppression using canonical label + normalized type signature.
+  - Canonicalized short duplicated labels (e.g., "Phone country code Phone country code" -> "Phone country code").
+  - Added option-list reuse across duplicate canonical labels so select protocol remains active.
+  - Added summary-level strict dedupe for identical canonical label+type and preferred highest-quality value (exact option match over partial text).
+  - Added guard for phone-country select without options to reject short partial text.
+- Validation evidence after fixes:
+  - Focused regressions: 62 passed.
+  - Full test suite: 157 passed.
+  - Live confidential parity e2e: 1 passed.
+- Current status:
+  - Summary duplicates issue and phone-country protocol inconsistency are patched and covered by tests.
+
+[User] 2026-04-16
+- Reported remaining manual-flow issues:
+  - Duplicate summary rows for selected questions (system/Lead Developer, Follow Confidential, Phone country code).
+  - Phone country code option filtering protocol inconsistent; substring remained as final value in one instance.
+- Requested strict sequence:
+  - First commit current checkpoint.
+  - Then investigate latest run/chat artifacts and fix remaining issues.
+
+[Copilot] 2026-04-16
 - Clarified validation output from human-operator perspective (manual acceptance flow, not internal pytest list).
 - Prepared a concrete manual test flow with pass/fail checkpoints based on current green automated and live parity evidence.
 - Focus shifted to operator-verifiable behavior in Telegram + LinkedIn preview path.
