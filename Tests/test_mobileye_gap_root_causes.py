@@ -166,6 +166,12 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("cards[", src)
         self.assertIn("including hidden required select", src)
 
+    def test_scan_path_extracts_modal_scope_html_via_locator_inner_html(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("def _extract_root_html", src)
+        self.assertIn("inner_html", src)
+        self.assertIn("_extract_root_html(root_obj=root, page_obj=page)", src)
+
     def test_scan_path_parses_hidden_card_templates(self):
         src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
         self.assertIn("baseTemplate", src)
@@ -177,6 +183,48 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("for _pass in range(4)", src)
         self.assertIn("_prefill_required_for_scan(root, scope=None)", src)
         self.assertIn("_scroll_root_once(root)", src)
+
+    def test_scan_prefill_prefers_synthetic_values_without_seed_answers(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("has_seed_answers = bool(seed_answers_map)", src)
+        self.assertIn("if has_seed_answers:", src)
+        self.assertIn("fill = _random_testing_value(label, ftype)", src)
+        self.assertIn("Scan prefill override: replacing existing value", src)
+        self.assertIn("if cur and _looks_scan_valid(cur, label, ftype):", src)
+
+    def test_scan_path_force_fills_required_controls_when_stagnant(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("def _force_fill_required_controls_for_stagnation", src)
+        self.assertIn("stale page detected; force-filled", src)
+        self.assertIn("_force_fill_required_controls_for_stagnation(scan_page, scope=modal_scope)", src)
+
+    def test_scan_path_uses_synthetic_file_fallback_for_required_uploads(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("def _ensure_synthetic_scan_file", src)
+        self.assertIn("Scan prefill file: using synthetic", src)
+        self.assertIn("scan_resume.pdf", src)
+        self.assertIn("input[type='file'][required]", src)
+
+    def test_scan_path_reuses_apply_step_filler_for_custom_widgets(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("self._fill_easy_apply_modal(page, bootstrap_answers, synthetic_cv)", src)
+        self.assertIn("bootstrap_answers", src)
+
+    def test_scan_select_prefill_skips_select_an_option_placeholder(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("select an option", src)
+        self.assertIn("text.startswith(\"select \")", src)
+
+    def test_scan_aborts_when_easy_apply_modal_not_detected_after_retry(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("Easy Apply modal did not appear after retry; aborting scan", src)
+        self.assertIn("return []", src)
+        self.assertIn("retry_selectors", src)
+
+    def test_scan_canonicalizes_resume_and_follow_labels(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("display_label = \"Resume\"", src)
+        self.assertIn("Follow Confidential to stay up to date with their page.", src)
 
     def test_saved_mobileye_html_contains_parseable_family_member_card_template(self):
         html_path = Path(__file__).resolve().parents[1] / "Selected HTMLs" / "Mobileye - Senior Software Engineer & Tech Lead [Application].html"
@@ -236,7 +284,7 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         label_blob = " | ".join(str(item.get("label", "")) for item in consent).lower()
         self.assertIn("mobileye can contact me", label_blob)
 
-    def test_build_fields_dedupes_mobileye_family_member_variants(self):
+    def test_build_fields_keeps_mobileye_family_member_variants_separate(self):
         session = self._make_session()
         session._apply_field_options = {
             "custom__family_long": [
@@ -258,9 +306,9 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         ]
         fields = session._build_apply_form_fields(scanned)
         custom_keys = [key for key, _ in fields if key.startswith("custom__")]
-        self.assertEqual(custom_keys, ["custom__family_long"])
+        self.assertEqual(custom_keys, ["custom__family_long", "custom__family_short"])
 
-    def test_build_fields_dedupes_marketing_consent_privacy_suffix_variant(self):
+    def test_build_fields_keeps_marketing_consent_privacy_suffix_variant_separate(self):
         session = self._make_session()
         session._apply_field_options = {
             "custom__consent_a": ["Yes", "No"],
@@ -280,7 +328,7 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         ]
         fields = session._build_apply_form_fields(scanned)
         custom_keys = [key for key, _ in fields if key.startswith("custom__")]
-        self.assertEqual(custom_keys, ["custom__consent_a"])
+        self.assertEqual(custom_keys, ["custom__consent_a", "custom__consent_b"])
 
     def test_build_fields_skips_linkedin_share_disclaimer_text_question(self):
         session = self._make_session()

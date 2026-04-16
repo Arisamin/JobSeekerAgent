@@ -89,5 +89,4 @@ powershell -NoProfile -Command "$baseline=@(); if('%BASELINE_AGENT_PIDS%' -ne ''
 
 echo.
 echo Agent exited with code %EXIT_CODE%.
-pause
 exit /b %EXIT_CODE%

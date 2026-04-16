@@ -1,0 +1,132 @@
+[Copilot] 2026-04-16
+- Clarified validation output from human-operator perspective (manual acceptance flow, not internal pytest list).
+- Prepared a concrete manual test flow with pass/fail checkpoints based on current green automated and live parity evidence.
+- Focus shifted to operator-verifiable behavior in Telegram + LinkedIn preview path.
+
+[User] 2026-04-16
+- Clarified that automated tests are background evidence only.
+- Asked for the exact manual flow a human can execute now, with current expected behavior and what should already work.
+- Requested approval-oriented flow so failures can be reported as new bug items.
+
+[Copilot] 2026-04-16
+- Executed requested immediate repeatability check.
+- Result:
+  - Live confidential Easy Apply parity e2e: 1 passed (second consecutive pass).
+- Current status:
+  - Live parity is currently stable across consecutive runs in this session.
+- Next steps:
+  - Optional runtime smoke: run one Telegram-driven Next -> Apply -> Preview cycle to validate operator-visible flow end-to-end.
+
+[User] 2026-04-16
+- Approved continuation with "go" to execute the next validation step.
+
+[Copilot] 2026-04-16
+- Executed confidence test sweep requested for current expected behavior.
+- Results:
+  - Focused core regressions: 80 passed.
+  - Full test suite: 153 passed.
+  - Live confidential Easy Apply parity e2e: 1 passed.
+- Validated real flow:
+  - Live LinkedIn Easy Apply discovery parity for confidential job contract is green.
+  - Scanner behavior and option protocol regressions are currently stable in automated coverage.
+- Current status:
+  - No failing automated checks detected in this run.
+  - Environment flakiness risk remains possible on fallback browser profile, but was not observed in this execution.
+- Next steps:
+  - Optional: run one live Telegram-driven search/apply preview cycle for runtime smoke confidence.
+
+[User] 2026-04-16
+- Requested running all necessary tests for confidence in current expected behavior.
+- Asked what actual flow can be tested now.
+
+[Copilot] 2026-04-16
+- Added a compact reusable log template block for future entries.
+- Preserved required ordering: newest pair at top, and [Copilot] above corresponding [User].
+- Ready-to-run test checklist provided in chat response for immediate validation.
+
+[User] 2026-04-16
+- Requested to execute #2 from prior next steps: add a tiny checklist template at top of chat log.
+- Asked what can be tested now.
+
+[Entry Template]
+- [Copilot] YYYY-MM-DD
+  - Progress this cycle:
+  - Regressions/obstacles:
+  - Corrective measures:
+  - Validation evidence (tests/runs):
+  - Current status:
+  - Open issues / next steps:
+- [User] YYYY-MM-DD
+  - Requested outcomes:
+  - Constraints/priorities:
+  - Clarifications/changes:
+
+[Copilot] 2026-04-16
+- Progress this cycle:
+  - Closed the remaining live parity gap in Easy Apply discovery.
+  - Live confidential parity test now passes after canonicalizing scan labels.
+- Regressions and obstacles observed:
+  - Fallback browser profile remained unstable (primary profile launch exitCode=21), causing intermittent modal behavior.
+  - Live parity previously missed two expected fields due to label-variant mismatch, not true field-discovery absence.
+- Corrective measures applied:
+  - In agent_engine scan ingestion, normalized file labels like "Upload resume"/"CV" to stable label "Resume".
+  - Normalized multilingual Confidential follow-company checkbox prompt to stable label "Follow Confidential to stay up to date with their page.".
+  - Kept strict safeguards from prior fixes: modal-scope extraction, placeholder filtering, retry-abort guard.
+  - Added persistent rule in HANDOVER.md requiring CHAT_LOG.txt update on every interaction.
+- Validation evidence:
+  - Focused regressions: 55 passed.
+  - Live confidential parity: 1 passed.
+- Current status:
+  - Easy Apply discovery parity currently green for the confidential live contract.
+  - Residual risk remains environment flakiness from fallback profile path.
+- Open issues / next steps:
+  - Re-run live parity at least once more for repeatability confidence.
+  - If flakiness reappears, add one controlled full-scan retry with run-tied diagnostics.
+  - Enforce ongoing continuity logging each interaction using this file.
+
+[User] 2026-04-16
+- Asked for immediate actionable test guidance based on current state.
+- Asked how to enforce chat-log updates on every interaction without repeated reminders.
+- Requested concise but complete continuity sections capturing:
+  - sequence of requests and progress,
+  - obstacles and regressions,
+  - corrective actions,
+  - current status,
+  - open issues and next steps.
+
+[Copilot] 2026-04-15
+- Reformatted chat log ordering to your required structure.
+- Enforced pair logic in the file: [Copilot] section first, corresponding [User] section directly below it.
+- Kept reverse chronology rule: newest entry pair remains at the top of the file.
+
+[User] 2026-04-15
+- Requested chat log ordering fix: [User] must appear below [Copilot] for each entry pair.
+- Clarified logic: when reading from top, first see what Copilot did, then read the [User] section below to understand why.
+- Reiterated reverse chronology requirement: latest entry at file beginning, older entries below.
+
+[Copilot] 2026-04-15
+- Read HANDOVER.md, regression tests, and latest confidential discovery reports; confirmed live run was missing expected fields.
+- Patched scanner in agent_engine.py:
+  - Added modal-safe HTML extraction for Locator scope (inner_html fallback) so review/summary recovery runs in Easy Apply modal scans.
+  - Added fallback advance-button detection on full page when modal-scoped lookup misses actionable footer controls.
+  - Added scanned-field type normalization to correct common misclassifications (email/select, mobile/text, follow-checkbox/text).
+- Updated option-selection protocol in agent_engine.py:
+  - Initial displayed list reduced to 20 options.
+  - Users can choose by number, full option text, or substring filter.
+  - Removed mandatory Confirm step for exact/single matches.
+  - Filtered sublists also display up to 20 matches with iterative narrowing.
+- Updated regressions:
+  - Tests/test_easy_apply_testing_mode.py: protocol expectations, 20-option truncation, exact-match direct selection, new type-normalization checks.
+  - Tests/test_mobileye_gap_root_causes.py: scanner source guard for locator inner_html extraction path.
+- Validation run results:
+  - pytest Tests/test_easy_apply_testing_mode.py Tests/test_mobileye_gap_root_causes.py -q -> 48 passed
+  - pytest Tests/test_apply_rescan_dedup.py Tests/test_linkedin_review_field_extraction.py -q -> 5 passed
+  - pytest Tests/test_confidential_easy_apply_e2e_live.py -q -> 1 skipped (expected without RUN_CONFIDENTIAL_LINKEDIN_E2E=1)
+
+[User] 2026-04-15
+- Resumed work after nightly restart and asked Copilot to use HANDOVER.md to recover context.
+- Main issue: Easy Apply discovery misses many real fields and sometimes misclassifies field types.
+- Required discovery behavior: capture all real required fields only, avoid assumptions, and prompt only when no suitable saved answer exists.
+- Required option protocol for predefined answers: show initial 20 options, allow substring filtering, then allow final selection by full value or number.
+- Asked to inspect the new end-to-end regression test for discovery and fix current erroneous behavior.
+- Added requirement: maintain a reverse-chronological chat log with [User] and [Copilot] date-stamped sections.

@@ -74,6 +74,44 @@ class TestCustomQuestionLabels(unittest.TestCase):
         self.assertTrue(keep_going)
         self.assertTrue(any(long_label in message for message in sent_messages))
 
+    def test_apply_summary_includes_all_scraped_fields_without_clustering(self):
+        session = self._make_session()
+        label_a = "How many years of work experience do you have with Distributed Systems?"
+        label_b = "How many years of work experience do you have with Cloud Infrastructure?"
+        key_a = session._custom_key_from_label(label_a)
+        key_b = session._custom_key_from_label(label_b)
+
+        session._current_job = {
+            "title": "Senior Backend Engineer",
+            "company": "Confidential",
+            "url": "https://www.linkedin.com/jobs/view/4400959935/",
+        }
+        session._apply_form_fields = [
+            (key_a, "prompt-a"),
+            (key_b, "prompt-b"),
+        ]
+        session._apply_field_labels = {
+            key_a: label_a,
+            key_b: label_b,
+        }
+        session._apply_answers = {
+            key_a: "2",
+        }
+        session._apply_asked_field_keys = []
+
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+
+        keep_going = session._show_apply_summary()
+
+        self.assertTrue(keep_going)
+        self.assertTrue(sent_messages)
+        summary = sent_messages[-1]
+        self.assertIn(label_a, summary)
+        self.assertIn(label_b, summary)
+        self.assertIn("(not provided)", summary)
+        self.assertEqual(summary.count("• Q"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,7 @@ class TestApplyRescanDedup(unittest.TestCase):
             "Are you presently employed by any company within the Booking Holdings group?",
         )
 
-    def test_rescan_dedup_keeps_existing_keys_and_answers(self):
+    def test_rescan_does_not_cluster_new_keys_into_existing_ones(self):
         session = self._make_session()
         session._current_job = {
             "title": "Back End Staff Software Engineer",
@@ -96,10 +96,11 @@ class TestApplyRescanDedup(unittest.TestCase):
 
         expanded = session._maybe_expand_apply_fields_via_rescan(session._current_job["url"])
 
-        self.assertFalse(expanded)
+        self.assertTrue(expanded)
         self.assertIn("agoda_booking_holdings_group_employment", session._apply_answers)
         self.assertIn("agoda_relationship", session._apply_answers)
-        self.assertNotIn("custom__bookings__a1b2", dict(session._apply_form_fields))
+        self.assertIn("custom__bookings__a1b2", dict(session._apply_form_fields))
+        self.assertIn("custom__relationship__c3d4", dict(session._apply_form_fields))
 
     def test_rescan_replaces_prompt_to_include_latest_options(self):
         session = self._make_session()
@@ -129,7 +130,7 @@ class TestApplyRescanDedup(unittest.TestCase):
             _ = seed_answers
             return [
                 (
-                    "custom__bookings__x1",
+                    "agoda_booking_holdings_group_employment",
                     "Are you presently employed by any company within the Booking Holdings group?",
                     "radio",
                 ),

@@ -126,7 +126,7 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertIn("Options:", prompts_by_key["custom__radio_q"])
         self.assertIn("1) Yes", prompts_by_key["custom__radio_q"])
         self.assertIn("2) No", prompts_by_key["custom__radio_q"])
-        self.assertIn("Reply with option number or text.", prompts_by_key["custom__radio_q"])
+        self.assertIn("Reply with an option number, the full option text, or a filter substring", prompts_by_key["custom__radio_q"])
 
         self.assertIn("1) Backend", prompts_by_key["custom__select_q"])
         self.assertIn("3) Data", prompts_by_key["custom__select_q"])
@@ -151,6 +151,42 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertTrue(is_valid)
         self.assertEqual(normalized, "No")
 
+    def test_normalize_scanned_field_type_corrects_common_misclassifications(self):
+        session = self._make_session()
+
+        self.assertEqual(
+            "email",
+            session._normalize_scanned_field_type(
+                field_key="email",
+                label="Email address Email address",
+                field_type="select",
+            ),
+        )
+        self.assertEqual(
+            "tel",
+            session._normalize_scanned_field_type(
+                field_key="phone",
+                label="Mobile phone number",
+                field_type="text",
+            ),
+        )
+        self.assertEqual(
+            "select",
+            session._normalize_scanned_field_type(
+                field_key="phone",
+                label="Phone country code Phone country code",
+                field_type="text",
+            ),
+        )
+        self.assertEqual(
+            "checkbox",
+            session._normalize_scanned_field_type(
+                field_key="custom__follow",
+                label="Follow Confidential to stay up to date with their page.",
+                field_type="text",
+            ),
+        )
+
     def test_build_apply_form_fields_truncates_displayed_options_for_large_select(self):
         session = self._make_session()
         many_options = [f"Country {i}" for i in range(1, 60)]
@@ -162,8 +198,8 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         prompt = prompts_by_key["custom__country"]
 
         self.assertIn("1) Country 1", prompt)
-        self.assertIn("25) Country 25", prompt)
-        self.assertNotIn("26) Country 26", prompt)
+        self.assertIn("20) Country 20", prompt)
+        self.assertNotIn("21) Country 21", prompt)
         self.assertIn("more option(s) not shown", prompt)
 
     def test_validate_apply_answer_rejects_unknown_free_text_for_select(self):
@@ -175,7 +211,103 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertFalse(is_valid)
         self.assertEqual(normalized, "")
 
-    def test_option_resolution_requires_confirm_for_exact_match(self):
+    def test_build_apply_form_fields_scan_only_omits_fixed_fields(self):
+        session = self._make_session()
+        scanned = [
+            ("custom__english", "What is your level of proficiency in English?", "select"),
+            ("phone", "Phone number", "tel"),
+        ]
+
+        fields = session._build_apply_form_fields(scanned, include_fixed_fields=False)
+        keys = [k for k, _ in fields]
+
+        self.assertIn("custom__english", keys)
+        self.assertIn("phone", keys)
+        self.assertNotIn("full_name", keys)
+        self.assertNotIn("location", keys)
+
+    def test_cmd_apply_uses_only_scanned_fields_when_scan_is_partial(self):
+        session = self._make_session()
+        session._current_job = {
+            "id": 7,
+            "title": "Senior Backend Engineer",
+            "company": "Confidential",
+            "url": "https://www.linkedin.com/jobs/view/4400959935/",
+        }
+        session._scan_easy_apply_fields = lambda _url: [
+            ("phone", "Mobile phone number", "tel"),
+            ("email", "Email address", "email"),
+            (
+                "custom__how_many_years_of_work_experience_do_you_have_with_cloud_infrastructure",
+                "How many years of work experience do you have with Cloud Infrastructure?",
+                "number",
+            ),
+        ]
+
+        self.assertTrue(session._cmd_apply())
+
+        keys = [k for k, _ in session._apply_form_fields]
+        self.assertNotIn("cv_path", keys)
+        self.assertNotIn("full_name", keys)
+        self.assertIn("email", keys)
+        self.assertIn("phone", keys)
+        self.assertNotIn("location", keys)
+        self.assertNotIn("linkedin", keys)
+        self.assertTrue(any(k.startswith("custom__") for k in keys))
+
+    def test_rescan_keeps_only_scanned_fields_and_appends_new_discovered_keys(self):
+        session = self._make_session()
+        session._easy_apply_run_mode = "search"
+        session._current_job = {
+            "id": 8,
+            "title": "Senior Backend Engineer",
+            "company": "Confidential",
+            "url": "https://www.linkedin.com/jobs/view/4400959935/",
+        }
+
+        session._apply_form_fields = session._build_apply_form_fields([
+            ("phone", "Mobile phone number", "tel"),
+            ("email", "Email address", "email"),
+        ], include_fixed_fields=False)
+        session._apply_answers = {}
+        session._apply_asked_field_keys = []
+        session._apply_question_idx = 0
+
+        session._scan_easy_apply_fields = lambda _url, seed_answers=None: [
+            ("phone", "Mobile phone number", "tel"),
+            ("email", "Email address", "email"),
+            (
+                "custom__how_many_years_of_work_experience_do_you_have_with_distributed_systems",
+                "How many years of work experience do you have with Distributed Systems?",
+                "number",
+            ),
+        ]
+
+        expanded = session._maybe_expand_apply_fields_via_rescan(session._current_job["url"])
+
+        self.assertTrue(expanded)
+        keys = [k for k, _ in session._apply_form_fields]
+        self.assertNotIn("cv_path", keys)
+        self.assertNotIn("full_name", keys)
+        self.assertNotIn("location", keys)
+        self.assertNotIn("linkedin", keys)
+        self.assertIn("phone", keys)
+        self.assertIn("email", keys)
+        self.assertTrue(any(k.startswith("custom__") for k in keys))
+
+    def test_resolve_apply_answer_prefers_custom_skill_specific_experience_key(self):
+        session = self._make_session()
+        label = "How many years of work experience do you have with Cloud Infrastructure?"
+        custom_key = session._custom_key_from_label(label)
+        answers = {
+            "experience_years": "5",
+            custom_key: "8",
+        }
+
+        resolved = session._resolve_apply_answer(label, answers)
+        self.assertEqual(resolved, "8")
+
+    def test_option_resolution_accepts_exact_match_without_confirm(self):
         session = self._make_session()
         sent_messages = []
         session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
@@ -195,11 +327,6 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         session._send_current_apply_prompt()
         session._handle_apply_answer("Albania")
 
-        self.assertNotIn("custom__country", session._apply_answers)
-        self.assertIsNotNone(session._option_resolution_state)
-        self.assertEqual(session._option_resolution_state.get("phase"), "await_confirm")
-
-        session._handle_apply_answer("Confirm")
         self.assertEqual(session._apply_answers.get("custom__country"), "Albania")
         self.assertEqual(session._apply_question_idx, 1)
 

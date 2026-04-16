@@ -10,6 +10,10 @@ These rules are required for this repo going forward:
   - and expected behavior/results.
 2. The agent must never initiate `git commit` or `git push` on its own.
   - Commits/pushes are done only when the user explicitly asks.
+3. The agent must update `CHAT_LOG.txt` on every interaction.
+  - Keep newest entry pair at top.
+  - Keep `[Copilot]` section above corresponding `[User]` section for each pair.
+  - Keep entries concise but sufficient for restart continuity (requests, regressions, fixes, current status, next steps/open issues).
 
 ## 1. Project Goal
 
@@ -247,10 +251,11 @@ Stop and correct immediately if any occur:
 ### Phase 1: Understand current state
 Read:
 1. `HANDOVER.md`
-2. `SKILL_CHECKLIST.md`
-3. `FLOWCHART_STATE_MACHINE.md`
-4. `Tests/test_mobileye_saved_html_summary.py`
-5. `Tests/test_mobileye_gap_root_causes.py`
+2. `CHAT_LOG.txt`
+3. `SKILL_CHECKLIST.md`
+4. `FLOWCHART_STATE_MACHINE.md`
+5. `Tests/test_mobileye_saved_html_summary.py`
+6. `Tests/test_mobileye_gap_root_causes.py`
 
 ### Phase 2: Prove baseline health
 - Run full tests.
