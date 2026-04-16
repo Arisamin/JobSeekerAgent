@@ -1,4 +1,6 @@
 import logging
+import json
+import os
 import sys
 import tempfile
 import unittest
@@ -437,6 +439,49 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertIn("In which country are you currently based?", invalid_labels)
         self.assertNotIn("custom__country", session._apply_answers)
         self.assertNotIn("custom__country", session._saved_profile)
+
+    def test_load_profile_consolidates_phone_country_code_alias_keys(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        profile_path = Path(temp_dir.name) / "profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "chat_profiles": {
+                        "1": {
+                            "custom__phone_country_code_phone_country_code__e2d23d73d6__dup2": "Israel (+972)",
+                            "custom__phone_country_code__42a596e1fa__dup2": "Israel (+972)",
+                            "custom__phone_country_code_phone_country_code__e2d23d73d6": "Azerbaijan (+994)",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"AGENT_PROFILE_PATH": str(profile_path)}):
+            session = self._make_session()
+
+        canonical_key = session._custom_key_from_label("Phone country code")
+        self.assertEqual("Israel (+972)", session._saved_profile.get(canonical_key))
+
+        profile_keys = list(session._saved_profile.keys())
+        extra_aliases = [
+            key
+            for key in profile_keys
+            if key.startswith("custom__phone_country_code") and key != canonical_key
+        ]
+        self.assertEqual([], extra_aliases)
+
+        persisted = json.loads(profile_path.read_text(encoding="utf-8"))
+        persisted_profile = persisted["chat_profiles"]["1"]
+        self.assertEqual("Israel (+972)", persisted_profile.get(canonical_key))
+        persisted_aliases = [
+            key
+            for key in persisted_profile.keys()
+            if key.startswith("custom__phone_country_code") and key != canonical_key
+        ]
+        self.assertEqual([], persisted_aliases)
 
 
 class _FakeLeaf:

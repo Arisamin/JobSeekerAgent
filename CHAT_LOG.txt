@@ -1,4 +1,54 @@
 [Copilot] 2026-04-16
+- Addressed root cause in discovery phase (not summary masking): duplicate visible fields were still allowed when same canonical label appeared with different inferred types.
+- Scanner fix:
+  - `_scan_easy_apply_fields._add(...)` now dedupes by canonical label signature only.
+  - If same label is re-detected, scanner updates existing entry type only when a richer type is found (no second discovered field entry).
+- Added regression guard ensuring discovery dedupe uses canonical label (not label+type pair).
+- Validation evidence:
+  - Focused tests: 65 passed.
+  - Full suite: 160 passed.
+  - Live confidential parity e2e: 1 passed.
+
+[User] 2026-04-16
+- Reported duplicate field in discovery message itself (same system/Lead Developer question listed twice).
+- Requested fixing the true root cause in discovery so summary correctness is a by-product.
+
+[Copilot] 2026-04-16
+- Investigated duplicated Phone country code entries in telegram_profile.json.
+- Root cause identified:
+  - Historical scan label variants generated different custom hashed keys (e.g., "Phone country code" vs "Phone country code Phone country code").
+  - Legacy duplicate-key handling appended `__dup2` suffixes.
+  - Saved-profile loader previously had no alias migration, so all historical keys remained persisted.
+- Fixes applied:
+  - Added startup saved-profile alias consolidation for phone-country custom keys to a single canonical key (`custom__phone_country_code__42a596e1fa`).
+  - Added regression test ensuring alias consolidation removes duplicates and persists canonical value.
+  - Manually normalized current telegram_profile.json entries to one canonical phone-country key.
+- Validation evidence:
+  - Focused tests: 32 passed.
+  - Full suite: 159 passed.
+
+[User] 2026-04-16
+- Asked why multiple Phone country code custom keys existed in telegram_profile.json instead of one canonical entry.
+
+[Copilot] 2026-04-16
+- Executed requested commit for current protocol improvements.
+  - Commit: e9fbeac
+  - Message: "Improve option selection protocol (number-finalize + indexed filtering); duplicate summary question still open"
+- Then fixed remaining duplicate-summary issue for repeated identical question labels.
+- Root-cause correction:
+  - Summary dedupe now keys by canonical label only (not label+type), so scan variants with different inferred field types cannot duplicate the same visible question in summary.
+- Added targeted regression for exact reported case:
+  - duplicate "Do you have experience as system/ Lead Developer in start-ups?" label across different field types appears once in summary.
+- Validation evidence after fix:
+  - Focused tests: 63 passed.
+  - Full suite: 158 passed.
+  - Live confidential parity e2e: 1 passed.
+
+[User] 2026-04-16
+- Requested committing current changes because option protocol worked well.
+- Reported persistent remaining issue: repeated summary question "Do you have experience as system/ Lead Developer in start-ups".
+
+[Copilot] 2026-04-16
 - Investigated persistent manual-run failures from Logs/run_20260416_215907.log.
 - Confirmed two active issues from latest runtime evidence:
   - Duplicate summary row still present for "Do you have experience as system/ Lead Developer in start-ups?".

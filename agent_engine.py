@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from urllib.parse import parse_qs, urlencode, urlparse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2672,6 +2673,8 @@ class TelegramJobSession:
             else self.db.db_path.parent / self.PROFILE_FILENAME
         )
         self._saved_profile: Dict[str, str] = self._load_saved_profile()
+        if self._normalize_saved_profile_aliases():
+            self._persist_saved_profile()
         mode = (easy_apply_run_mode or "search").strip().lower()
         self._easy_apply_run_mode = mode if mode in {"search", "testing"} else "search"
 
@@ -3030,6 +3033,75 @@ class TelegramJobSession:
         except Exception as exc:
             self.logger.warning(f"Failed to persist Telegram profile: {exc}")
 
+    def _normalize_saved_profile_aliases(self) -> bool:
+        """Consolidate historical alias keys in saved profile into canonical keys."""
+        if not self._saved_profile:
+            return False
+
+        changed = False
+
+        def _pick_best_value(candidates: List[Tuple[str, str]], canonical_key: str) -> str:
+            if not candidates:
+                return ""
+
+            counts = Counter(value for _key, value in candidates)
+            if counts:
+                top_count = max(counts.values())
+                top_values = [value for value, count in counts.items() if count == top_count]
+                if len(top_values) == 1 and top_count > 1:
+                    return top_values[0]
+
+            ranked = sorted(
+                candidates,
+                key=lambda kv: (
+                    0 if kv[0] == canonical_key else 1,
+                    0 if kv[0].startswith(canonical_key + "__dup") else 1,
+                    0 if "__dup" not in kv[0] else 1,
+                    kv[0],
+                ),
+            )
+            return ranked[0][1]
+
+        def _consolidate_custom_aliases(label: str, key_prefixes: List[str]) -> None:
+            nonlocal changed
+
+            canonical_key = self._custom_key_from_label(label)
+            candidate_items: List[Tuple[str, str]] = []
+            for key, value in list(self._saved_profile.items()):
+                if not any(key.startswith(prefix) for prefix in key_prefixes):
+                    continue
+                cleaned = (value or "").strip()
+                if cleaned:
+                    candidate_items.append((key, cleaned))
+
+            if not candidate_items:
+                return
+
+            chosen_value = _pick_best_value(candidate_items, canonical_key)
+            if not chosen_value:
+                return
+
+            keys_to_remove = {
+                key
+                for key in list(self._saved_profile.keys())
+                if any(key.startswith(prefix) for prefix in key_prefixes)
+            }
+            for key in keys_to_remove:
+                if key in self._saved_profile:
+                    self._saved_profile.pop(key, None)
+                    changed = True
+
+            if self._saved_profile.get(canonical_key) != chosen_value:
+                self._saved_profile[canonical_key] = chosen_value
+                changed = True
+
+        _consolidate_custom_aliases(
+            label="Phone country code",
+            key_prefixes=["custom__phone_country_code"],
+        )
+
+        return changed
+
     def _scan_is_radio_selected(self, radio_input: Any) -> bool:
         try:
             return radio_input.is_checked(timeout=200)
@@ -3160,10 +3232,29 @@ class TelegramJobSession:
         discovered: List[Tuple[str, str, str]] = []
         discovered_options: Dict[str, List[str]] = {}
         seen_keys: set = set()
-        seen_field_signatures: set = set()
-        signature_to_key: Dict[Tuple[str, str], str] = {}
+        signature_to_key: Dict[str, str] = {}
+        signature_to_index: Dict[str, int] = {}
         seen_card_template_payload_ids: set = set()
         synthetic_scan_files: Dict[str, str] = {}
+
+        def _field_type_rank(field_type: str) -> int:
+            normalized = (field_type or "text").strip().lower() or "text"
+            rank_map = {
+                "select": 95,
+                "radio": 90,
+                "checkbox": 85,
+                "action": 80,
+                "file": 75,
+                "email": 72,
+                "tel": 70,
+                "number": 68,
+                "date": 66,
+                "url": 64,
+                "textarea": 62,
+                "text": 50,
+                "unknown": 10,
+            }
+            return rank_map.get(normalized, 50)
 
         def _random_digits(length: int) -> str:
             return "".join(random.choice("0123456789") for _ in range(length))
@@ -3563,17 +3654,17 @@ class TelegramJobSession:
             if not canonical_label:
                 return
 
-            signature = (
-                canonical_label.lower(),
-                normalized_type,
-            )
+            signature = canonical_label.lower()
             existing_key = signature_to_key.get(signature)
             if existing_key:
                 _merge_options(existing_key, options or [])
-                return
-
-            if signature in seen_field_signatures:
-                _merge_options(key, options or [])
+                existing_index = signature_to_index.get(signature)
+                if existing_index is not None and 0 <= existing_index < len(discovered):
+                    existing_field_key, existing_label, existing_type = discovered[existing_index]
+                    chosen_type = existing_type
+                    if _field_type_rank(normalized_type) > _field_type_rank(existing_type):
+                        chosen_type = normalized_type
+                    discovered[existing_index] = (existing_field_key, existing_label, chosen_type)
                 return
 
             resolved_key = key
@@ -3584,8 +3675,8 @@ class TelegramJobSession:
                     suffix += 1
                 resolved_key = f"{base_key}__dup{suffix}"
 
-            seen_field_signatures.add(signature)
             signature_to_key[signature] = resolved_key
+            signature_to_index[signature] = len(discovered)
             seen_keys.add(resolved_key)
             _merge_options(resolved_key, options or [])
             discovered.append((resolved_key, canonical_label, normalized_type))
@@ -6559,8 +6650,8 @@ class TelegramJobSession:
                 return 3 if self._match_option_exact(value, field_options) else 1
             return 2
 
-        dedupe_order: List[Tuple[str, str]] = []
-        deduped_rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        dedupe_order: List[str] = []
+        deduped_rows: Dict[str, Dict[str, Any]] = {}
 
         for field_key, prompt in self._apply_form_fields:
             value = (self._apply_answers.get(field_key) or "").strip()
@@ -6569,9 +6660,10 @@ class TelegramJobSession:
                 label = prompt.split(" ", 1)[1].rstrip(":") if " " in prompt else prompt.rstrip(":")
                 label = label.split(" (", 1)[0].strip()
 
-            normalized_type = (self._apply_field_types.get(field_key, "") or "").strip().lower()
             canonical_label = self._canonicalize_apply_label(label) or normalize_form_label(label)
-            dedupe_key = (canonical_label.lower(), normalized_type)
+            dedupe_key = canonical_label.lower()
+            if not dedupe_key:
+                continue
 
             if dedupe_key not in deduped_rows:
                 dedupe_order.append(dedupe_key)

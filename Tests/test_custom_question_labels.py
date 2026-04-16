@@ -155,6 +155,48 @@ class TestCustomQuestionLabels(unittest.TestCase):
         self.assertIn("Israel (+972)", summary)
         self.assertNotIn("<b>Phone country code</b>: Isr\n", summary)
 
+    def test_apply_summary_dedupes_identical_labels_even_when_types_differ(self):
+        session = self._make_session()
+        label = "Do you have experience as system/ Lead Developer in start-ups?"
+        key_radio = session._custom_key_from_label(label)
+        key_text = f"{key_radio}__dup2"
+
+        session._current_job = {
+            "title": "Senior System Engineer",
+            "company": "Confidential",
+            "url": "https://www.linkedin.com/jobs/view/4391480724/",
+        }
+        session._apply_form_fields = [
+            (key_radio, "prompt-radio"),
+            (key_text, "prompt-text"),
+        ]
+        session._apply_field_labels = {
+            key_radio: label,
+            key_text: label,
+        }
+        session._apply_field_types = {
+            key_radio: "radio",
+            key_text: "text",
+        }
+        session._apply_field_options = {
+            key_radio: ["Yes", "No"],
+        }
+        session._apply_answers = {
+            key_radio: "No",
+            key_text: "No",
+        }
+        session._apply_asked_field_keys = []
+
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+
+        keep_going = session._show_apply_summary()
+
+        self.assertTrue(keep_going)
+        self.assertTrue(sent_messages)
+        summary = sent_messages[-1]
+        self.assertEqual(summary.count(label), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

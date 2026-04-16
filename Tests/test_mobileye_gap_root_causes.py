@@ -226,6 +226,12 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("display_label = \"Resume\"", src)
         self.assertIn("Follow Confidential to stay up to date with their page.", src)
 
+    def test_scan_dedupes_on_canonical_label_not_label_type_pair(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("signature = canonical_label.lower()", src)
+        self.assertIn("signature_to_index", src)
+        self.assertIn("discovered[existing_index] = (existing_field_key, existing_label, chosen_type)", src)
+
     def test_saved_mobileye_html_contains_parseable_family_member_card_template(self):
         html_path = Path(__file__).resolve().parents[1] / "Selected HTMLs" / "Mobileye - Senior Software Engineer & Tech Lead [Application].html"
         self.assertTrue(html_path.exists(), f"Missing artifact: {html_path}")
