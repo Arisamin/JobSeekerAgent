@@ -113,7 +113,7 @@ class TestExternalSubmitFallback(unittest.TestCase):
             call_kwargs = apply_mock.call_args.kwargs
             self.assertEqual(call_kwargs["submit_application"], True)
             self.assertEqual(call_kwargs["allow_external_prefill"], True)
-            self.assertEqual(call_kwargs["force_headed"], True)
+            self.assertEqual(call_kwargs["force_headed"], False)
 
             sent = "\n".join(session._sent_messages)
             self.assertIn("submit was not confirmed", sent.lower())

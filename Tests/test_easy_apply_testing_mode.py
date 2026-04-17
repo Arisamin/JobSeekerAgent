@@ -483,6 +483,46 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         ]
         self.assertEqual([], persisted_aliases)
 
+    def test_submission_payload_log_emits_once_per_application(self):
+        session = self._make_session()
+        session._current_job = {
+            "title": "Role",
+            "company": "Comp",
+            "url": "https://www.linkedin.com/jobs/view/1/",
+        }
+        session._apply_form_fields = [
+            ("email", "prompt"),
+        ]
+        session._apply_field_labels = {
+            "email": "Email address",
+        }
+        session._submission_audit_logged = False
+
+        class _AuditLogger:
+            def __init__(self):
+                self.info_lines = []
+                self.error_lines = []
+
+            def info(self, msg, *args):
+                self.info_lines.append(msg % args if args else msg)
+
+            def error(self, msg, *args):
+                self.error_lines.append(msg % args if args else msg)
+
+            def warning(self, msg, *args):
+                _ = (msg, args)
+
+        audit_logger = _AuditLogger()
+        session.logger = audit_logger
+
+        answers = {"email": "ariel.samin@gmail.com"}
+        session._log_submission_payload_once("linkedin_easy_apply", answers, page=None)
+        session._log_submission_payload_once("external_apply", answers, page=None)
+
+        submission_logs = [line for line in audit_logger.info_lines if "SUBMISSION_PAYLOAD" in line]
+        self.assertEqual(1, len(submission_logs))
+        self.assertTrue(any("SUBMISSION_PAYLOAD_DUPLICATE" in line for line in audit_logger.error_lines))
+
 
 class _FakeLeaf:
     def __init__(self, visible: bool = True):

@@ -2659,6 +2659,7 @@ class TelegramJobSession:
         self._apply_field_options: Dict[str, List[str]] = {}
         self._apply_field_types: Dict[str, str] = {}
         self._option_resolution_state: Optional[Dict[str, Any]] = None
+        self._submission_audit_logged: bool = False
         self._return_state_after_apply: str = self.STATE_INTRO
         self._prefill_launch_server: Optional[ThreadingHTTPServer] = None
         self._prefill_launch_thread: Optional[threading.Thread] = None
@@ -6181,6 +6182,7 @@ class TelegramJobSession:
         self._state = self.STATE_APPLYING
         self._apply_answers = {}
         self._option_resolution_state = None
+        self._submission_audit_logged = False
         for field_key, _prompt in self._apply_form_fields:
             saved_value = (self._saved_profile.get(field_key) or "").strip()
             if not saved_value and field_key.startswith("custom__"):
@@ -6308,6 +6310,7 @@ class TelegramJobSession:
         self._apply_field_labels = {}
         self._last_preview_browser_snapshot = []
         self._apply_scan_unverified = False
+        self._submission_audit_logged = False
         self._state = self._return_state_after_apply
         self._send(
             f"🚫 Application for job ID <code>{jid}</code> cancelled.\n\n"
@@ -6728,6 +6731,72 @@ class TelegramJobSession:
         self._state = self.STATE_APPLY_CONFIRM
         return True
 
+    def _log_submission_payload_once(
+        self,
+        channel: str,
+        answers: Dict[str, str],
+        page: Optional[Any] = None,
+    ) -> None:
+        """Emit one canonical submission payload audit entry per application run."""
+        if self._submission_audit_logged:
+            self.logger.error(
+                "SUBMISSION_PAYLOAD_DUPLICATE: attempted second submission audit log "
+                f"for channel={channel}"
+            )
+            return
+
+        self._submission_audit_logged = True
+
+        job = self._current_job or {}
+        title = str(job.get("title") or "")
+        company = str(job.get("company") or "")
+        url = str(job.get("url") or "")
+
+        answer_rows: List[Tuple[str, str]] = []
+        seen_keys: set[str] = set()
+        for field_key, _prompt in self._apply_form_fields:
+            if field_key in seen_keys:
+                continue
+            seen_keys.add(field_key)
+            label = self._apply_field_labels.get(field_key) or field_key
+            value = (answers.get(field_key) or "").strip() or "(not provided)"
+            answer_rows.append((label, value))
+
+        # Include any additional keys that were submitted but not present in current form ordering.
+        extra_keys = [k for k in answers.keys() if k not in seen_keys]
+        for key in sorted(extra_keys):
+            value = (answers.get(key) or "").strip() or "(not provided)"
+            answer_rows.append((key, value))
+
+        browser_rows: List[Tuple[str, str]] = []
+        if page is not None:
+            try:
+                browser_rows = self._capture_visible_modal_field_snapshot(page)
+            except Exception:
+                browser_rows = []
+
+        lines: List[str] = []
+        lines.append("SUBMISSION_PAYLOAD")
+        lines.append(f"channel={channel}")
+        lines.append(f"job_title={title}")
+        lines.append(f"job_company={company}")
+        lines.append(f"job_url={url}")
+        lines.append("answers_used_for_submission:")
+        if answer_rows:
+            for idx, (label, value) in enumerate(answer_rows, 1):
+                lines.append(f"  [{idx}] {normalize_form_label(label)} = {value}")
+        else:
+            lines.append("  (none)")
+
+        lines.append("visible_browser_snapshot_before_submit:")
+        if browser_rows:
+            for idx, (label, value) in enumerate(browser_rows, 1):
+                lines.append(f"  [{idx}] {normalize_form_label(label)} = {(value or '').strip() or '(not provided)'}")
+        else:
+            lines.append("  (unavailable)")
+
+        self.logger.info("\n".join(lines))
+
     def _cmd_preview_apply(self) -> bool:
         """User requested preview mode: fill form and stop on final review step without submitting."""
         job = self._current_job or {}
@@ -6795,7 +6864,7 @@ class TelegramJobSession:
             answers,
             submit_application=True,
             allow_external_prefill=True,
-            force_headed=True,
+            force_headed=False,
         )
 
         if success:
@@ -6839,6 +6908,7 @@ class TelegramJobSession:
         self._apply_field_labels = {}
         self._last_preview_browser_snapshot = []
         self._apply_scan_unverified = False
+        self._submission_audit_logged = False
         self._state = self._return_state_after_apply
         return True
 
@@ -7110,10 +7180,20 @@ class TelegramJobSession:
                                     pass
                             if submitted:
                                 self.logger.info("Easy Apply: submission confirmed")
+                                self._log_submission_payload_once(
+                                    channel="linkedin_easy_apply",
+                                    answers=answers,
+                                    page=page,
+                                )
                                 return True, "Application submitted successfully."
                             # If no explicit confirmation, treat as success (LinkedIn sometimes
                             # closes the modal without a visible banner)
                             self.logger.info("Easy Apply: modal closed after Submit – treating as success")
+                            self._log_submission_payload_once(
+                                channel="linkedin_easy_apply",
+                                answers=answers,
+                                page=page,
+                            )
                             return True, "Application submitted (modal closed after Submit)."
 
                         elif "next" in btn_text or "review" in btn_text or "continue" in btn_text or "التالي" in btn_text or "مراجعة" in btn_text or "الاستمرار" in btn_text:
@@ -7205,7 +7285,7 @@ class TelegramJobSession:
                     pass
 
             if submit_application:
-                return self._submit_external_application_form(page, roots)
+                return self._submit_external_application_form(page, roots, answers)
 
             if keep_browser_open:
                 try:
@@ -7245,7 +7325,12 @@ class TelegramJobSession:
             pass
         return False
 
-    def _submit_external_application_form(self, page: Any, roots: List[Any]) -> Tuple[bool, str]:
+    def _submit_external_application_form(
+        self,
+        page: Any,
+        roots: List[Any],
+        answers: Dict[str, str],
+    ) -> Tuple[bool, str]:
         """Try to submit an external application page after prefill."""
         submit_selectors = [
             "button[type='submit']",
@@ -7266,6 +7351,11 @@ class TelegramJobSession:
 
         for attempt in range(3):
             if self._external_submission_confirmed(page):
+                self._log_submission_payload_once(
+                    channel="external_apply",
+                    answers=answers,
+                    page=page,
+                )
                 return True, "External application submitted successfully."
 
             clicked_any = False
@@ -7319,6 +7409,11 @@ class TelegramJobSession:
                                 pass
 
                             if self._external_submission_confirmed(page):
+                                self._log_submission_payload_once(
+                                    channel="external_apply",
+                                    answers=answers,
+                                    page=page,
+                                )
                                 return True, "External application submitted successfully."
                         except Exception:
                             continue

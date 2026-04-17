@@ -232,6 +232,15 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("signature_to_index", src)
         self.assertIn("discovered[existing_index] = (existing_field_key, existing_label, chosen_type)", src)
 
+    def test_submit_flow_uses_single_submission_audit_logger(self):
+        submit_src = inspect.getsource(agent_engine.TelegramJobSession._cmd_submit_apply)
+        do_apply_src = inspect.getsource(agent_engine.TelegramJobSession._do_linkedin_easy_apply)
+        external_src = inspect.getsource(agent_engine.TelegramJobSession._submit_external_application_form)
+
+        self.assertIn("force_headed=False", submit_src)
+        self.assertIn("_log_submission_payload_once", do_apply_src)
+        self.assertIn("_log_submission_payload_once", external_src)
+
     def test_saved_mobileye_html_contains_parseable_family_member_card_template(self):
         html_path = Path(__file__).resolve().parents[1] / "Selected HTMLs" / "Mobileye - Senior Software Engineer & Tech Lead [Application].html"
         self.assertTrue(html_path.exists(), f"Missing artifact: {html_path}")

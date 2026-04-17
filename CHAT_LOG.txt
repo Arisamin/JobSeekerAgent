@@ -1,3 +1,38 @@
+[Copilot] 2026-04-17
+- Implemented unified submission audit logging per your reliability requirement.
+  - Added `_log_submission_payload_once(...)` and routed all automatic submission paths through it:
+    - LinkedIn Easy Apply submit-confirmed path.
+    - External form submit-confirmed path.
+  - Added duplicate-guard behavior: if a second submission audit is attempted in same apply run, log explicit `SUBMISSION_PAYLOAD_DUPLICATE` error.
+  - Added test asserting only one `SUBMISSION_PAYLOAD` print is emitted per application run.
+- Changed submit command to run headless by default (`force_headed=False`) so submit no longer opens a forced visible browser window.
+- Investigated "submit in same headless window as summary" requirement:
+  - Not currently possible with existing architecture because scan context is closed after discovery and summary is generated from cached answers, not a live retained modal session.
+  - Also scan uses synthetic prefill for traversal, so that scan window is not safe to directly submit from.
+- Validation evidence:
+  - Targeted submission-flow tests: 67 passed.
+  - Full suite with live env flag cleared: 161 passed, 1 skipped.
+
+[User] 2026-04-17
+- Requested two changes:
+  1) one canonical submission log print with actual submitted details for all submission-capable code paths.
+  2) submission in the headless window tied to summary context (or explicit notice if impossible).
+- Added reliability expectation: seeing 2 submission prints indicates bug.
+
+[Copilot] 2026-04-17
+- Completed requested commit before investigation.
+  - Commit: b483520
+  - Message: "Fix discovery-level dedupe and option/profile normalization; summary parity restored"
+- Investigated why Submit opens a browser and refills instead of submitting the already-scanned modal session.
+- Root cause confirmed in code:
+  - Scan and submit are separate browser lifecycles; scan context is always closed after discovery (`_scan_easy_apply_fields` closes `ctx`).
+  - Submit path explicitly calls `_do_linkedin_easy_apply(...)` which launches a fresh persistent context and refills steps.
+  - Submit command also forces headed mode (`force_headed=True`), which is why a visible browser window opens.
+- Result: current behavior is by design, not a random regression.
+
+[User] 2026-04-17
+- Requested: commit current good state (discovery/summary/apply success), then investigate why submit opens new browser/fill flow instead of submitting from the existing headless in-progress form.
+
 [Copilot] 2026-04-16
 - Addressed root cause in discovery phase (not summary masking): duplicate visible fields were still allowed when same canonical label appeared with different inferred types.
 - Scanner fix:
