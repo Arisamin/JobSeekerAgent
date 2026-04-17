@@ -717,10 +717,20 @@ class ProcessedJobsDB:
 
     @classmethod
     def normalize_apply_mode(cls, raw_mode: Optional[str]) -> str:
-        mode = (raw_mode or "").strip().lower()
-        if mode == "easy apply":
+        mode = normalize_space(raw_mode or "").lower()
+        if not mode:
+            return cls.APPLY_MODE_UNKNOWN
+
+        # Handle decorated/raw variants such as emojis or extra wording.
+        if mode == "easy apply" or ("easy" in mode and "apply" in mode):
             return cls.APPLY_MODE_EASY
-        if mode == "external apply":
+        if (
+            mode == "external apply"
+            or ("external" in mode and "apply" in mode)
+            or "company site" in mode
+            or "apply on company site" in mode
+            or "apply with linkedin" in mode
+        ):
             return cls.APPLY_MODE_EXTERNAL
         return cls.APPLY_MODE_UNKNOWN
 
@@ -1691,15 +1701,16 @@ class LinkedInJobAgent:
         normalized_mode = ProcessedJobsDB.normalize_apply_mode(detected_mode)
         if normalized_mode != ProcessedJobsDB.APPLY_MODE_UNKNOWN:
             return normalized_mode
-        if not (self.easy_apply_only and self._search_url_has_easy_apply_filter):
-            return normalized_mode
 
         if self._card_has_easy_apply_badge(card):
             self.log_step(
                 "3.3",
-                f"Coerced apply mode to Easy Apply from card badge in easy-apply-only filtered search: {job_url}",
+                f"Coerced apply mode to Easy Apply from card badge: {job_url}",
             )
             return ProcessedJobsDB.APPLY_MODE_EASY
+
+        if not (self.easy_apply_only and self._search_url_has_easy_apply_filter):
+            return normalized_mode
 
         self.log_step(
             "3.3",
@@ -2012,9 +2023,19 @@ class LinkedInJobAgent:
                 [
                     "<div class='toolbar'>",
                     "<button id='update-agent-btn' class='primary'>Update Agent</button>",
+                    "<label for='db-order-by'>Order by:</label>",
+                    "<select id='db-order-by'>",
+                    "<option value='apply_mode'>Apply Mode</option>",
+                    "<option value='recommendation'>Recommendation</option>",
+                    "<option value='status' selected>Status</option>",
+                    "</select>",
+                    "<select id='db-order-dir'>",
+                    "<option value='asc' selected>Ascending</option>",
+                    "<option value='desc'>Descending</option>",
+                    "</select>",
                     "<span id='apply-status-msg' class='muted'>Update Agent sends selected statuses to DB and opens DB update mode.</span>",
                     "</div>",
-                    "<table><thead><tr><th>ID</th><th>Title</th><th>Company</th><th>URL</th><th>Apply Mode</th><th>Recommendation</th><th>Status</th><th>Last Updated</th></tr></thead>",
+                    "<table id='db-jobs-table'><thead><tr><th>ID</th><th>Title</th><th>Company</th><th>URL</th><th data-sort-key='apply_mode' class='sortable'>Apply Mode</th><th data-sort-key='recommendation' class='sortable'>Recommendation</th><th data-sort-key='status' class='sortable'>Status</th><th>Last Updated</th></tr></thead>",
                     f"<tbody>{''.join(db_rows)}</tbody></table>",
                 ]
             )
@@ -2041,6 +2062,8 @@ class LinkedInJobAgent:
                 "table{width:100%;border-collapse:collapse;margin-top:10px}",
                 "th,td{border:1px solid #334155;padding:8px;vertical-align:top}",
                 "th{background:#1f2937}",
+                "th.sortable{cursor:pointer;user-select:none}",
+                "th.sortable:hover{background:#273449}",
                 "a{color:#93c5fd}",
                 ".badge{background:#1d4ed8;color:#fff;border-radius:6px;padding:2px 8px}",
                 ".approval{margin-top:12px;font-weight:600}",
@@ -2048,6 +2071,7 @@ class LinkedInJobAgent:
                 "button.primary{background:#2563eb;color:#fff;border:1px solid #1d4ed8;border-radius:6px;padding:8px 14px;cursor:pointer}",
                 "button.primary:hover{background:#1d4ed8}",
                 "select.status-select{width:100%;min-width:140px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px}",
+                "#db-order-by,#db-order-dir{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px}",
                 ".muted{color:#94a3b8}",
                 ".params-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}",
                 ".param{background:#0b1220;border:1px solid #263244;border-radius:8px;padding:8px 10px}",
@@ -2110,7 +2134,61 @@ class LinkedInJobAgent:
                 "    btn.disabled = false;",
                 "  }",
                 "}",
+                "function _cellSortText(row, columnIndex){",
+                "  const cell = row.cells[columnIndex];",
+                "  if (!cell) return '';",
+                "  const select = cell.querySelector('select');",
+                "  if (select) return (select.value || '').trim().toLowerCase();",
+                "  return (cell.textContent || '').trim().toLowerCase();",
+                "}",
+                "function _compareSortValues(a, b){",
+                "  if (a === b) return 0;",
+                "  const na = Number(a);",
+                "  const nb = Number(b);",
+                "  if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;",
+                "  return a.localeCompare(b, undefined, {numeric: true, sensitivity: 'base'});",
+                "}",
+                "function applyDbOrderBy(){",
+                "  const table = document.getElementById('db-jobs-table');",
+                "  if (!table) return;",
+                "  const orderBy = (document.getElementById('db-order-by') || {}).value || 'status';",
+                "  const orderDir = (document.getElementById('db-order-dir') || {}).value || 'asc';",
+                "  const columnMap = {apply_mode: 4, recommendation: 5, status: 6};",
+                "  const columnIndex = columnMap[orderBy] ?? 6;",
+                "  const tbody = table.querySelector('tbody');",
+                "  if (!tbody) return;",
+                "  const rows = Array.from(tbody.querySelectorAll('tr'));",
+                "  rows.sort((leftRow, rightRow) => {",
+                "    const leftValue = _cellSortText(leftRow, columnIndex);",
+                "    const rightValue = _cellSortText(rightRow, columnIndex);",
+                "    const cmp = _compareSortValues(leftValue, rightValue);",
+                "    return orderDir === 'desc' ? -cmp : cmp;",
+                "  });",
+                "  rows.forEach(row => tbody.appendChild(row));",
+                "  table.dataset.sortKey = orderBy;",
+                "  table.dataset.sortDir = orderDir;",
+                "  const msg = document.getElementById('apply-status-msg');",
+                "  if (msg) msg.textContent = `Ordered DB table by ${orderBy.replace('_', ' ')} (${orderDir.toUpperCase()}).`;",
+                "}",
+                "function toggleDbSortFromHeader(sortKey){",
+                "  const table = document.getElementById('db-jobs-table');",
+                "  if (!table) return;",
+                "  const prevKey = table.dataset.sortKey || 'status';",
+                "  const prevDir = table.dataset.sortDir || 'asc';",
+                "  const nextDir = (prevKey === sortKey && prevDir === 'asc') ? 'desc' : 'asc';",
+                "  const orderBySelect = document.getElementById('db-order-by');",
+                "  const orderDirSelect = document.getElementById('db-order-dir');",
+                "  if (orderBySelect) orderBySelect.value = sortKey;",
+                "  if (orderDirSelect) orderDirSelect.value = nextDir;",
+                "  applyDbOrderBy();",
+                "}",
                 "document.getElementById('update-agent-btn')?.addEventListener('click', applyStatusUpdates);",
+                "document.getElementById('db-order-by')?.addEventListener('change', applyDbOrderBy);",
+                "document.getElementById('db-order-dir')?.addEventListener('change', applyDbOrderBy);",
+                "document.querySelectorAll('#db-jobs-table thead th[data-sort-key]').forEach(th => {",
+                "  th.addEventListener('click', () => toggleDbSortFromHeader(th.dataset.sortKey));",
+                "});",
+                "applyDbOrderBy();",
                 "</script>",
                 "</body></html>",
             ]
@@ -2535,6 +2613,7 @@ class TelegramJobSession:
     submit  – (after summary) fill & submit LinkedIn Easy Apply form; mark Applied only on success
     preview – (after summary) fill LinkedIn Easy Apply form and stop before Submit for visual review
     skip    – mark current job Skipped
+    startover – restart chat session from intro and browse this run from the start
     done    – terminate session (process exits)
     db      – switch to DB-browse mode; send jobs one by one
     cancel  – abort an in-progress apply form or confirmation at any step
@@ -5949,9 +6028,12 @@ class TelegramJobSession:
         cmd = command_text.lower()
         cmd_name, cmd_arg = (cmd.split(maxsplit=1) + [""])[:2] if cmd else ("", "")
         abort_aliases = {"cancel", "quit", "abort", "stop", "give up", "giveup"}
+        startover_aliases = {"startover", "start over", "restart", "restart chat"}
 
         # --- In-progress apply guard -----------------------------------------
         if self._apply_in_progress_job_id is not None:
+            if cmd in startover_aliases:
+                return self._cmd_startover()
             if cmd in abort_aliases:
                 return self._cmd_cancel_apply()
 
@@ -5984,6 +6066,8 @@ class TelegramJobSession:
             return self._cmd_done()
         if cmd_name == "db":
             return self._cmd_db()
+        if cmd in startover_aliases:
+            return self._cmd_startover()
         if cmd in {"reset profile", "resetprofile"}:
             self._saved_profile = {}
             self._persist_saved_profile()
@@ -6008,7 +6092,7 @@ class TelegramJobSession:
         # Unrecognised
         self._send(
             "❓ Unknown command.\n"
-            "Available: <b>Next</b> | <b>Next &lt;name&gt;</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b> | <b>db</b> | <b>Cancel</b>/<b>Quit</b>"
+            "Available: <b>Next</b> | <b>Next &lt;name&gt;</b> | <b>Apply</b> | <b>Skip</b> | <b>db</b> | <b>Startover</b> | <b>Done</b> | <b>Cancel</b>/<b>Quit</b>"
         )
         return True
 
@@ -6032,6 +6116,30 @@ class TelegramJobSession:
         self._current_job = self._db_jobs[0]
         total = len(self._db_jobs)
         self._send(self._db_card_text(self._current_job, 1, total))
+        return True
+
+    def _cmd_startover(self) -> bool:
+        """Restart the Telegram session flow from intro and first job."""
+        self._apply_in_progress_job_id = None
+        self._apply_question_idx = 0
+        self._apply_answers = {}
+        self._option_resolution_state = None
+        self._apply_asked_field_keys = []
+        self._apply_form_fields = []
+        self._apply_field_labels = {}
+        self._last_preview_browser_snapshot = []
+        self._apply_scan_unverified = False
+        self._submission_audit_logged = False
+        self._return_state_after_apply = self.STATE_INTRO
+
+        self._db_jobs = []
+        self._db_job_idx = 0
+        self._new_job_idx = -1
+        self._current_job = None
+        self._state = self.STATE_INTRO
+
+        self._send("🔄 Restarting chat session from the beginning of this run.")
+        self.send_intro()
         return True
 
     def _job_matches_name(self, job: Dict, name_query: str) -> bool:
@@ -7958,7 +8066,7 @@ class TelegramJobSession:
                 f"👋 <b>Job Agent Report</b> — {now_str}\n\n"
                 f"🔍 Query: <i>{html.escape(self.query)}</i>\n\n"
                 "📭 No new jobs found in this run.\n\n"
-                "Reply <b>db</b> to browse all DB jobs | <b>Done</b> to finish"
+                "Reply <b>db</b> to browse all DB jobs | <b>Startover</b> to restart this chat | <b>Done</b> to finish"
             )
         else:
             companies = sorted({j.get("company", "?") for j in self.new_jobs if j.get("company")})
@@ -7971,6 +8079,7 @@ class TelegramJobSession:
                 "Commands:\n"
                 "  <b>Next</b>  – review first job\n"
                 "  <b>db</b>    – browse all DB jobs\n"
+                "  <b>Startover</b> – restart this chat session\n"
                 "  <b>Done</b>  – finish for today"
             )
         self._send(body)

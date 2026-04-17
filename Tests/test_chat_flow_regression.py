@@ -563,5 +563,45 @@ class TestGithubProfileValidation(unittest.TestCase):
             _cleanup(session)
 
 
+class TestStartoverCommand(unittest.TestCase):
+    def test_startover_restarts_intro_and_resets_new_job_cursor(self):
+        session = _make_session(new_jobs=[_sample_job(), _sample_job("Dev", "Acme2")])
+        try:
+            session.send_intro()
+            # Move forward once so we can verify cursor reset.
+            session._cmd_next()
+            self.assertEqual(session._new_job_idx, 0)
+
+            keep_going = session._handle_command("startover")
+
+            self.assertTrue(keep_going)
+            self.assertEqual(session._state, session.STATE_BROWSING_NEW)
+            self.assertEqual(session._new_job_idx, -1)
+            self.assertIsNone(session._current_job)
+            joined = " ".join(session._sent_messages)
+            self.assertIn("Restarting chat session", joined)
+            self.assertIn("Job Agent Report", joined)
+        finally:
+            _cleanup(session)
+
+    def test_startover_clears_in_progress_apply_state(self):
+        session = _make_session(new_jobs=[_sample_job()])
+        try:
+            session._apply_in_progress_job_id = 999
+            session._state = session.STATE_APPLYING
+            session._apply_answers = {"email": "x@example.com"}
+            session._apply_form_fields = [("email", "Email")]
+
+            keep_going = session._handle_command("start over")
+
+            self.assertTrue(keep_going)
+            self.assertIsNone(session._apply_in_progress_job_id)
+            self.assertEqual(session._apply_answers, {})
+            self.assertEqual(session._apply_form_fields, [])
+            self.assertEqual(session._state, session.STATE_BROWSING_NEW)
+        finally:
+            _cleanup(session)
+
+
 if __name__ == "__main__":
     unittest.main()

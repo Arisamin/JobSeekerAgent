@@ -160,6 +160,16 @@ class TestJobMetadataPersistence(unittest.TestCase):
         self.assertEqual(jobs[0]["recommendation"], "STRONG MATCH")
         self.assertEqual(jobs[0]["apply_mode"], "Easy Apply")
 
+    def test_normalize_apply_mode_accepts_decorated_variants(self):
+        self.assertEqual(
+            agent_engine.ProcessedJobsDB.normalize_apply_mode("⚡ Easy Apply"),
+            agent_engine.ProcessedJobsDB.APPLY_MODE_EASY,
+        )
+        self.assertEqual(
+            agent_engine.ProcessedJobsDB.normalize_apply_mode("Apply on company site"),
+            agent_engine.ProcessedJobsDB.APPLY_MODE_EXTERNAL,
+        )
+
 
 class TestTelegramApplyModeDisplay(unittest.TestCase):
     def _make_session(self):
@@ -284,6 +294,13 @@ class TestReportHtmlSectionsMetadata(unittest.TestCase):
         self.assertIn("External Apply", html_text)
         self.assertIn("B) Jobs in DB", html_text)
         self.assertIn("Recommendation", html_text)
+        self.assertIn("id='db-order-by'", html_text)
+        self.assertIn("id='db-order-dir'", html_text)
+        self.assertIn("applyDbOrderBy", html_text)
+        self.assertIn("data-sort-key='apply_mode'", html_text)
+        self.assertIn("data-sort-key='recommendation'", html_text)
+        self.assertIn("data-sort-key='status'", html_text)
+        self.assertIn("toggleDbSortFromHeader", html_text)
 
 
 class _FakeLocatorItem:
@@ -453,6 +470,19 @@ class TestApplyModeDetection(unittest.TestCase):
         )
 
         self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN)
+
+    def test_finalize_apply_mode_coerces_unknown_from_easy_apply_card_badge_even_without_url_filter(self):
+        agent = self._make_agent()
+        agent.easy_apply_only = False
+        agent._search_url_has_easy_apply_filter = False
+
+        mode = agent._finalize_apply_mode_for_discovery(
+            agent_engine.ProcessedJobsDB.APPLY_MODE_UNKNOWN,
+            _FakeCardForEasyApplyFallback("Easy Apply"),
+            "https://www.linkedin.com/jobs/view/789/",
+        )
+
+        self.assertEqual(mode, agent_engine.ProcessedJobsDB.APPLY_MODE_EASY)
 
 
 class TestAdaptiveJitter(unittest.TestCase):

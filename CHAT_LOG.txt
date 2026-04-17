@@ -1,3 +1,45 @@
+[Copilot] 2026-04-18
+- Investigated reported Recruitx apply-mode mismatch in report.
+- Evidence from latest generated report (`run_report_20260418_001546.html`):
+  - DB row for Recruitx job URL ending `/4403410246/` is `Easy Apply`.
+  - This confirms DB metadata is correct for that row in current latest report.
+- Hardening shipped to prevent future false `Unknown` labels from variant text formatting:
+  - `ProcessedJobsDB.normalize_apply_mode(...)` now accepts decorated/variant strings (e.g., emojis, extra wording), not only strict exact matches.
+  - Added handling for common external wording (`Apply on company site`, `company site`, etc.).
+- Report UX improvement shipped:
+  - Added clickable DB table header sorting for `Apply Mode`, `Recommendation`, and `Status`.
+  - Existing dropdown sort controls still work and stay in sync with header-click sorting.
+- Regression tests updated:
+  - Added normalize-variant coverage for apply mode.
+  - Added HTML assertions for sortable headers and header-click sort handler wiring.
+
+[Copilot] 2026-04-17
+- Implemented three requested product changes:
+  1) Added chat command `Startover` (aliases: `start over`, `restart`) to reset Telegram session flow back to intro and restart browsing from the beginning of this run.
+     - Works even during in-progress apply flow (clears apply state, then re-sends intro).
+  2) Added HTML report "Order by" controls in DB section for:
+     - Apply Mode
+     - Recommendation
+     - Status
+     with Ascending/Descending direction.
+     - Client-side sort updates DB table rows without page refresh.
+  3) Fixed Easy Apply classification fallback for report accuracy:
+     - When probe-based detection returns `Unknown`, card-level Easy Apply badge now coerces apply mode to `Easy Apply` even without URL-filter fallback.
+     - This reduces false `Unknown` cases for true Easy Apply jobs (e.g., intermittent probe/modal confirmation misses).
+- Validation evidence:
+  - `Tests/test_report_mode_and_job_metadata.py`: 25 passed.
+  - `Tests/test_chat_flow_regression.py`: 21 passed.
+- Added/updated tests:
+  - Startover command behavior and in-progress reset.
+  - Report HTML includes order-by controls and sort handler.
+  - Apply-mode finalization from Easy Apply card badge without relying on URL-filter flag.
+
+[User] 2026-04-17
+- Requested three fixes:
+  1) Add `Startover` command to return to start of chat and re-browse last search results.
+  2) Add HTML report order-by option for Apply Mode, Recommendation, and Status columns.
+  3) Fix report bug where true Easy Apply job (example: job URL ending `/4402903322/`) appears as `Unknown`.
+
 [Copilot] 2026-04-17
 - Addressed concern that discovery should not depend on familiar field hints.
 - Scanner hardening update:
