@@ -13,12 +13,15 @@
       "custom__do_you_have_experience_as_system__lead_devel__5a84e70dd2": "No",
       "custom__confidential__a49fd30533": "No",
       "custom__follow_confidential_to_stay_up_to_date_with__aba11b130e": "No",
-      "custom__phone_country_code__42a596e1fa": "Israel (+972)",
-      "custom__phone_country_code_phone_country_code__e2d23d73d6": "Israel (+972)",
       "custom__how_many_years_of_work_experience_do_you_hav__0831b27762": "0",
       "custom__how_many_years_of_work_experience_do_you_hav__7c3eba0ce1": "0",
       "custom__how_many_years_of_work_experience_do_you_hav__e86d84f18c": "8",
-      "custom__follow_innodata_inc__to_stay_up_to_date_with__21bd5a65e8": "No"
+      "custom__follow_innodata_inc__to_stay_up_to_date_with__21bd5a65e8": "No",
+      "custom__last_name__2b06184783__dup2": "Samin",
+      "custom__follow_cynet_security_to_stay_up_to_date_wit__5b53eecc20": "No",
+      "custom__phone_country_code__42a596e1fa": "Israel (+972)",
+      "custom__phone_country_code_phone_country_code__e2d23d73d6": "Israel (+972)",
+      "cover_letter_path": ""
     }
   }
 }

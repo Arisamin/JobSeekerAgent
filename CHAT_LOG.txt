@@ -1,4 +1,67 @@
 [Copilot] 2026-04-17
+- Addressed concern that discovery should not depend on familiar field hints.
+- Scanner hardening update:
+  - Hidden file controls in active Easy Apply modal are now included by default during scan (unless disabled), instead of only when matching known required/resume/cv-style hints.
+  - Cover-letter vs CV classification still uses combined label/name/id/accept context.
+  - Logging updated to `Scan: including hidden file input ...` for clearer forensic traces.
+- Regression test updated to enforce this broader hidden-file discovery behavior.
+- Validation evidence after hardening:
+  - `Tests/test_mobileye_gap_root_causes.py`: 37 passed.
+  - `Tests/test_easy_apply_testing_mode.py`: 28 passed.
+
+[User] 2026-04-17
+- Challenged scanner rationale about hidden/known field handling and requested explanation for why agent cannot discover all fields regardless of familiarity/type.
+- Stated expectation: no field should become undiscoverable due to unfamiliar variants.
+
+[Copilot] 2026-04-17
+- Investigated missed field: "Be sure to include an updated cover letter".
+- Root cause confirmed in scanner file-input logic:
+  - Hidden file inputs were included only when required/resume/cv-like.
+  - Hidden optional cover-letter slots could be skipped, so cover-letter prompt never appeared.
+- Not a new field type; this is a known cover-letter upload pattern that regressed in hidden-input handling.
+- Implemented fix in `_scan_easy_apply_fields` file-input pass:
+  - Hidden file-input inclusion now also checks cover/letter/upload/attachment/document/pdf/doc hints from name/id/accept.
+  - Cover-slot classification now uses combined label/name/id/accept hints before deciding `cover_letter_path` vs `cv_path`.
+- Added regression guard test:
+  - `test_scan_path_includes_hidden_cover_letter_file_inputs`
+- Validation evidence:
+  - `Tests/test_mobileye_gap_root_causes.py`: 37 passed.
+  - `Tests/test_easy_apply_testing_mode.py`: 28 passed.
+
+[User] 2026-04-17
+- Reported missed Easy Apply field: "Be sure to include an updated cover letter".
+- Asked whether this is a new type, whether it is a regression, and whether test coverage was missing.
+- Requested root-cause clarity due development setback concerns.
+
+[Copilot] 2026-04-17
+- Completed your explicit ordering request before any further work:
+  - Commit created first: c3a4003
+  - Message: "Add single submission payload audit and headless submit mode; update submission-flow tests"
+- Continued Innodata CV forensic investigation using latest logs.
+- Evidence confirmed for run `run_20260417_012055.log`:
+  - `SUBMISSION_PAYLOAD` recorded Resume answer as `C:\MyData\Ariel CV - 2026 [2].pdf`.
+  - Submission success was confirmed for Innodata.
+  - There was no submit-time `Easy Apply: uploaded CV` line, only scan-time prefill upload lines.
+- Root cause identified for wrong CV risk:
+  - Submit filler previously skipped hidden file inputs.
+  - LinkedIn can keep a preselected saved resume card (for example "My CV.pdf") when real file input is hidden.
+- Fix implemented in form-filling path:
+  - `_fill_easy_apply_modal(...)` now processes hidden document-like file inputs (resume/cover inferred by hints like name/id/label/accept/required).
+  - Added explicit filename logging for CV/cover uploads (including hidden/fallback context).
+  - `_capture_visible_modal_field_snapshot(...)` now captures resume/cover filenames from document cards (`jobs-document-card__filename`, `ui-attachment__filename`) for submission audit visibility.
+- Added regression guards:
+  - `test_submit_flow_handles_hidden_resume_inputs_and_logs_filename`
+  - `test_submission_snapshot_includes_resume_document_cards`
+- Validation evidence after fix:
+  - `Tests/test_mobileye_gap_root_causes.py`: 36 passed.
+  - `Tests/test_easy_apply_testing_mode.py`: 28 passed.
+
+[User] 2026-04-17
+- Required strict order: "before you do anything further, commit the current changes, and then continue".
+- Reported production concern: Innodata application submitted with wrong CV (LinkedIn-selected file like "My CV.pdf" instead of provided cv path).
+- Requested immediate CHAT_LOG update and explicit clarification whether operator must manage LinkedIn-known CV files or whether automation enforces the provided CV path in-form.
+
+[Copilot] 2026-04-17
 - Implemented unified submission audit logging per your reliability requirement.
   - Added `_log_submission_payload_once(...)` and routed all automatic submission paths through it:
     - LinkedIn Easy Apply submit-confirmed path.

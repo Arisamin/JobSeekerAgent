@@ -3779,39 +3779,54 @@ class TelegramJobSession:
             for fi in root.locator("input[type='file']").all():
                 try:
                     fi_id = ""
+                    fi_name = ""
+                    fi_accept = ""
+                    fi_required = False
+                    fi_disabled = False
+                    try:
+                        fi_name = (fi.get_attribute("name", timeout=250) or "").strip().lower()
+                    except Exception:
+                        fi_name = ""
+                    try:
+                        fi_id = (fi.get_attribute("id", timeout=250) or "").strip().lower()
+                    except Exception:
+                        fi_id = ""
+                    try:
+                        fi_accept = (fi.get_attribute("accept", timeout=250) or "").strip().lower()
+                    except Exception:
+                        fi_accept = ""
+                    try:
+                        fi_required = fi.get_attribute("required", timeout=250) is not None
+                    except Exception:
+                        fi_required = False
+                    try:
+                        fi_disabled = fi.get_attribute("disabled", timeout=250) is not None
+                    except Exception:
+                        fi_disabled = False
+
                     include_hidden_file = False
                     try:
                         if not fi.is_visible(timeout=400):
-                            fi_name = (fi.get_attribute("name", timeout=250) or "").strip().lower()
-                            fi_id = (fi.get_attribute("id", timeout=250) or "").strip().lower()
-                            required_attr = fi.get_attribute("required", timeout=250)
-                            include_hidden_file = (
-                                required_attr is not None
-                                or "resume" in fi_name
-                                or "cv" in fi_name
-                                or "resume" in fi_id
-                                or "cv" in fi_id
-                            )
-                            if not include_hidden_file:
+                            # Discover hidden file controls by default so unfamiliar
+                            # provider variants are not silently missed.
+                            include_hidden_file = True
+                            if fi_disabled:
                                 continue
                     except Exception:
                         continue
                     label = _label_for(page, fi)
                     if not label:
                         label = _fallback_label_from_attrs(fi)
-                    fi_name = ""
-                    try:
-                        fi_name = (fi.get_attribute("name", timeout=250) or "").strip().lower()
-                    except Exception:
-                        fi_name = ""
                     ll = label.lower()
                     if "linkedin profile" in ll and fi_name in {"resume", "cv", "resume_upload"}:
                         # AWLI LinkedIn import block can leak this heading into the file input label.
                         label = "Resume / CV"
                         ll = label.lower()
+                    hint_blob = f"{ll} {fi_name} {fi_id} {fi_accept}".lower()
+                    is_cover_slot = "cover" in hint_blob and "recover" not in hint_blob
                     if include_hidden_file:
-                        self.logger.info(f"Scan: including hidden required file input for label '{label or fi_name or fi_id}'")
-                    if "cover" in ll:
+                        self.logger.info(f"Scan: including hidden file input for label '{label or fi_name or fi_id}'")
+                    if is_cover_slot:
                         _add("cover_letter_path", label or "Cover letter", "file")
                     else:
                         _add("cv_path", label or "Resume / CV", "file")
@@ -7508,6 +7523,26 @@ class TelegramJobSession:
                     snapshot.append((normalize_form_label(label), value))
                 except Exception:
                     continue
+
+            # Resume/cover selections can appear as cards without a visible file input.
+            for node in page.locator(".jobs-document-card__filename, .ui-attachment__filename").all():
+                try:
+                    if not node.is_visible(timeout=250):
+                        continue
+                    filename_text = normalize_form_label(node.inner_text(timeout=250) or "")
+                    if not filename_text:
+                        continue
+                    context_text = ""
+                    try:
+                        context_text = (
+                            node.locator("xpath=ancestor::*[self::li or self::div][1]").inner_text(timeout=250) or ""
+                        ).lower()
+                    except Exception:
+                        context_text = ""
+                    label = "Cover letter" if "cover" in context_text else "Resume"
+                    snapshot.append((label, filename_text))
+                except Exception:
+                    continue
         except Exception:
             return []
 
@@ -7613,8 +7648,33 @@ class TelegramJobSession:
 
             for fi in page.locator("input[type='file']").all():
                 try:
-                    if not fi.is_visible(timeout=1000):
-                        continue
+                    fi_visible = False
+                    try:
+                        fi_visible = bool(fi.is_visible(timeout=1000))
+                    except Exception:
+                        fi_visible = False
+
+                    fi_name = ""
+                    fi_id = ""
+                    fi_accept = ""
+                    fi_required = False
+                    try:
+                        fi_name = (fi.get_attribute("name", timeout=300) or "").strip().lower()
+                    except Exception:
+                        fi_name = ""
+                    try:
+                        fi_id = (fi.get_attribute("id", timeout=300) or "").strip().lower()
+                    except Exception:
+                        fi_id = ""
+                    try:
+                        fi_accept = (fi.get_attribute("accept", timeout=300) or "").strip().lower()
+                    except Exception:
+                        fi_accept = ""
+                    try:
+                        fi_required = fi.get_attribute("required", timeout=300) is not None
+                    except Exception:
+                        fi_required = False
+
                     label_context = ""
                     try:
                         label_context = (
@@ -7623,15 +7683,48 @@ class TelegramJobSession:
                     except Exception:
                         pass
 
-                    if "cover" in label_context and cover_letter_path and Path(cover_letter_path).exists():
+                    direct_label = ""
+                    try:
+                        direct_label = _get_label(fi).lower()
+                    except Exception:
+                        direct_label = ""
+
+                    hint_blob = " ".join(
+                        part
+                        for part in [label_context, direct_label, fi_name, fi_id, fi_accept]
+                        if part
+                    ).lower()
+                    is_cover_slot = "cover" in hint_blob
+                    is_resume_slot = ("resume" in hint_blob or re.search(r"\bcv\b", hint_blob) is not None) and not is_cover_slot
+                    is_doc_slot = (
+                        is_cover_slot
+                        or is_resume_slot
+                        or any(tok in hint_blob for tok in ["upload", "attachment", "document", "file"])
+                        or any(tok in fi_accept for tok in ["pdf", "doc"])
+                    )
+
+                    # LinkedIn sometimes hides the real document input behind a custom card.
+                    # Do not require visibility for inputs that look like resume/cover slots.
+                    if not fi_visible and not (is_doc_slot or fi_required):
+                        continue
+
+                    if is_cover_slot and cover_letter_path and Path(cover_letter_path).exists():
                         fi.set_input_files(cover_letter_path)
-                        self.logger.info("Easy Apply: uploaded cover letter")
+                        self.logger.info(
+                            "Easy Apply: uploaded cover letter file '%s'%s",
+                            Path(cover_letter_path).name,
+                            " (hidden input)" if not fi_visible else "",
+                        )
                         page.wait_for_timeout(500)
                         continue
 
-                    if ("resume" in label_context or "cv" in label_context) and cv_path and Path(cv_path).exists():
+                    if is_resume_slot and cv_path and Path(cv_path).exists():
                         fi.set_input_files(cv_path)
-                        self.logger.info("Easy Apply: uploaded CV")
+                        self.logger.info(
+                            "Easy Apply: uploaded CV file '%s'%s",
+                            Path(cv_path).name,
+                            " (hidden input)" if not fi_visible else "",
+                        )
                         page.wait_for_timeout(500)
                         continue
 
@@ -7643,12 +7736,20 @@ class TelegramJobSession:
 
                     if not current_files and cv_path and Path(cv_path).exists():
                         fi.set_input_files(cv_path)
-                        self.logger.info("Easy Apply: uploaded CV (fallback)")
+                        self.logger.info(
+                            "Easy Apply: uploaded CV file '%s' (fallback)%s",
+                            Path(cv_path).name,
+                            " (hidden input)" if not fi_visible else "",
+                        )
                         page.wait_for_timeout(500)
                         cv_path = ""
                     elif not current_files and cover_letter_path and Path(cover_letter_path).exists():
                         fi.set_input_files(cover_letter_path)
-                        self.logger.info("Easy Apply: uploaded cover letter (fallback)")
+                        self.logger.info(
+                            "Easy Apply: uploaded cover letter file '%s' (fallback)%s",
+                            Path(cover_letter_path).name,
+                            " (hidden input)" if not fi_visible else "",
+                        )
                         page.wait_for_timeout(500)
                         cover_letter_path = ""
                 except Exception:

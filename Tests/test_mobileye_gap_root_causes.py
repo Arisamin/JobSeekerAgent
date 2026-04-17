@@ -205,6 +205,13 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("scan_resume.pdf", src)
         self.assertIn("input[type='file'][required]", src)
 
+    def test_scan_path_includes_hidden_cover_letter_file_inputs(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn('include_hidden_file = True', src)
+        self.assertIn('if fi_disabled:', src)
+        self.assertIn('is_cover_slot = "cover" in hint_blob', src)
+        self.assertIn('_add("cover_letter_path", label or "Cover letter", "file")', src)
+
     def test_scan_path_reuses_apply_step_filler_for_custom_widgets(self):
         src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
         self.assertIn("self._fill_easy_apply_modal(page, bootstrap_answers, synthetic_cv)", src)
@@ -240,6 +247,20 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("force_headed=False", submit_src)
         self.assertIn("_log_submission_payload_once", do_apply_src)
         self.assertIn("_log_submission_payload_once", external_src)
+
+    def test_submit_flow_handles_hidden_resume_inputs_and_logs_filename(self):
+        fill_src = inspect.getsource(agent_engine.TelegramJobSession._fill_easy_apply_modal)
+
+        self.assertIn("if not fi_visible and not (is_doc_slot or fi_required):", fill_src)
+        self.assertIn("is_resume_slot", fill_src)
+        self.assertIn("Easy Apply: uploaded CV file", fill_src)
+
+    def test_submission_snapshot_includes_resume_document_cards(self):
+        snap_src = inspect.getsource(agent_engine.TelegramJobSession._capture_visible_modal_field_snapshot)
+
+        self.assertIn("jobs-document-card__filename", snap_src)
+        self.assertIn("ui-attachment__filename", snap_src)
+        self.assertIn("snapshot.append((label, filename_text))", snap_src)
 
     def test_saved_mobileye_html_contains_parseable_family_member_card_template(self):
         html_path = Path(__file__).resolve().parents[1] / "Selected HTMLs" / "Mobileye - Senior Software Engineer & Tech Lead [Application].html"
