@@ -1,4 +1,53 @@
 [Copilot] 2026-04-18
+- Investigated runtime failure where Easy Apply submit/preview stalled on step 4 for question:
+  - "Are you able to work in a hybrid schedule based in Tel Aviv..."
+- Evidence from latest run log (`Logs/run_20260418_124947.log`):
+  - Summary captured answers for duplicated hybrid-schedule radio prompts (Q8/Q9 = Yes).
+  - Fill flow reached step 4 repeatedly, then failed with "wizard stopped progressing".
+  - Fill logs showed select/text actions only, with no radio-selection log on step 4.
+- Root cause:
+  - `_fill_easy_apply_modal(...)` only selected radios inside `<fieldset>` blocks.
+  - LinkedIn rendered this question as standalone/custom radio grouping (outside fieldset), so no selection was attempted.
+- Fix implemented:
+  - Added submit/preview radio handling for:
+    - fieldset radios with stronger matching and fallback click/check path,
+    - standalone radio groups by shared `name`,
+    - ARIA radio groups (`role='radiogroup'` + `role='radio'`).
+  - Reused robust radio click fallback helper for non-standard wrappers.
+- Test coverage:
+  - Added regression guard: `test_submit_fill_handles_standalone_and_aria_radio_groups`.
+  - Targeted tests passed: 67 passed.
+
+[Copilot] 2026-04-18
+- Implemented three requested feature sets:
+  1) Phone country code persistence hardening:
+    - Migrated phone-country answer storage to a stable dedicated profile key: `phone_country_code`.
+    - Added alias migration from historical `custom__phone_country_code*` keys into the stable key.
+    - Updated scanner label-to-profile mapping so phone-country labels resolve to the stable key across label variants.
+    - Goal: prevent repeated re-asking of already-answered country-code question.
+  2) Apply summary edit command:
+    - Added `Modify N` command at APPLY_CONFIRM summary stage.
+    - `N` maps to summary question numbering (`Q1`, `Q2`, ...), re-asks that specific field, and returns to summary.
+    - Modified answer is now scoped to current application only and does not overwrite saved profile cache.
+  3) New run result filter modes:
+    - Added CLI flag `--result-filter-mode` with modes:
+     - `all` (default)
+     - `easy_apply_do_not_apply_only`
+     - `easy_apply_match`
+    - `easy_apply_*` modes force Easy Apply discovery filter and apply post-analysis filtering to run results.
+    - Report now displays active `Result Filter Mode` in search parameters.
+- Added/updated regression tests for all above flows and updated Telegram state-machine flowchart for `Modify N` loop.
+
+[User] 2026-04-18
+- Reported three issues/requests:
+  1) Phone country code keeps being re-asked despite prior answers.
+  2) Need summary-stage command `Modify N` to edit one answer for current application only (without updating saved cache).
+  3) Add run modes:
+    - `easy_apply_do_not_apply_only`
+    - `easy_apply_match`
+- Requested continued updates to flowcharts, tests, and CHAT_LOG.
+
+[Copilot] 2026-04-18
 - Investigated reported Recruitx apply-mode mismatch in report.
 - Evidence from latest generated report (`run_report_20260418_001546.html`):
   - DB row for Recruitx job URL ending `/4403410246/` is `Easy Apply`.

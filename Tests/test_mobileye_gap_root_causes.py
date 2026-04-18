@@ -255,6 +255,14 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("is_resume_slot", fill_src)
         self.assertIn("Easy Apply: uploaded CV file", fill_src)
 
+    def test_submit_fill_handles_standalone_and_aria_radio_groups(self):
+        fill_src = inspect.getsource(agent_engine.TelegramJobSession._fill_easy_apply_modal)
+
+        self.assertIn("Standalone radio groups by name (outside fieldset)", fill_src)
+        self.assertIn("input[type='radio'][name='", fill_src)
+        self.assertIn("for rg in page.locator(\"[role='radiogroup']\").all()", fill_src)
+        self.assertIn("_scan_try_select_radio_input", fill_src)
+
     def test_submission_snapshot_includes_resume_document_cards(self):
         snap_src = inspect.getsource(agent_engine.TelegramJobSession._capture_visible_modal_field_snapshot)
 

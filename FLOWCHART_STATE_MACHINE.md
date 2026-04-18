@@ -35,6 +35,7 @@ flowchart TD
 	R --> H
 
 	S --> T{User reply}
+	T -- Modify N --> H
 	T -- Preview --> U[Run fill flow in preview mode]
 	T -- Submit --> V[Run fill + submit]
 	T -- Cancel --> W[Abort apply and restore previous state]
@@ -52,5 +53,7 @@ flowchart TD
 ## Notes
 
 - Easy Apply remains wizard-driven and uses modal step progression semantics.
+- Wizard fill handles radio controls in fieldset groups, standalone name-based groups, and ARIA radiogroups.
 - External Apply flow can be same-tab or popup/new-tab and is scanned as a page form, not a modal wizard.
 - Dynamic rescans are answer-seeded so later pages become discoverable.
+- Summary stage supports `Modify N` to update one answer for the current application only (saved profile remains unchanged).

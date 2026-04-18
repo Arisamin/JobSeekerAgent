@@ -49,6 +49,28 @@ Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 .\Start_Agent_Search_Mode.bat --easy-apply-only
 ```
 
+Result-filter modes (post-analysis run filtering):
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\Start_Agent_Search_Mode.bat --result-filter-mode easy_apply_do_not_apply_only
+```
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\Start_Agent_Search_Mode.bat --result-filter-mode easy_apply_match
+```
+
+What these new params do:
+- `--result-filter-mode all` (default): no post-analysis filtering.
+- `--result-filter-mode easy_apply_do_not_apply_only`: keeps only `Easy Apply` jobs with recommendation `DO NOT APPLY` in run results.
+- `--result-filter-mode easy_apply_match`: keeps only `Easy Apply` jobs with match-level recommendations (for example `MATCH` / `STRONG MATCH`) in run results.
+
+Important behavior:
+- Both `easy_apply_do_not_apply_only` and `easy_apply_match` force Easy Apply discovery filtering automatically (equivalent to Easy Apply-only discovery intent for that run).
+- Filtering is applied after recommendation analysis, so DB metadata is still refreshed for analyzed jobs.
+- Report search parameters now include `Result Filter Mode` so operator can verify active mode.
+
 Important note:
 - `--easy-apply-run-mode search` controls apply-flow scanning behavior only.
 - It does not filter discovered jobs to Easy Apply.
@@ -76,6 +98,11 @@ Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 .\Start_Agent_Search_Mode.bat --query "Senior C# Developer Israel"
+```
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\Start_Agent_Search_Mode.bat --easy-apply-only --result-filter-mode easy_apply_match --max-jobs 5 --headless
 ```
 
 ## 3) Clear jobs DB

@@ -462,7 +462,7 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         with patch.dict(os.environ, {"AGENT_PROFILE_PATH": str(profile_path)}):
             session = self._make_session()
 
-        canonical_key = session._custom_key_from_label("Phone country code")
+        canonical_key = "phone_country_code"
         self.assertEqual("Israel (+972)", session._saved_profile.get(canonical_key))
 
         profile_keys = list(session._saved_profile.keys())
@@ -482,6 +482,25 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
             if key.startswith("custom__phone_country_code") and key != canonical_key
         ]
         self.assertEqual([], persisted_aliases)
+
+    def test_profile_key_for_phone_country_code_uses_stable_key(self):
+        session = self._make_session()
+        session._saved_profile = {"phone_country_code": "Israel (+972)"}
+        scanned = [
+            ("phone_country_code", "Phone country code Phone country code", "select"),
+        ]
+
+        form_fields = session._build_apply_form_fields(scanned, include_fixed_fields=False)
+        field_keys = [key for key, _prompt in form_fields]
+
+        self.assertIn("phone_country_code", field_keys)
+
+        prefilled = {}
+        for field_key, _prompt in form_fields:
+            saved_value = (session._saved_profile.get(field_key) or "").strip()
+            if saved_value:
+                prefilled[field_key] = saved_value
+        self.assertEqual(prefilled.get("phone_country_code"), "Israel (+972)")
 
     def test_submission_payload_log_emits_once_per_application(self):
         session = self._make_session()

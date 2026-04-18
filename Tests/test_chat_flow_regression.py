@@ -603,5 +603,81 @@ class TestStartoverCommand(unittest.TestCase):
             _cleanup(session)
 
 
+class TestModifySummaryAnswerCommand(unittest.TestCase):
+    def test_modify_command_reasks_selected_question(self):
+        session = _make_session(new_jobs=[_sample_job()])
+        try:
+            session._current_job = _sample_job()
+            session._state = session.STATE_APPLY_CONFIRM
+            session._apply_in_progress_job_id = session._current_job["id"]
+            session._apply_form_fields = [("email", "✏️ Email:")]
+            session._apply_field_labels = {"email": "Email"}
+            session._apply_field_types = {"email": "text"}
+            session._apply_field_options = {}
+            session._apply_answers = {"email": "old@example.com"}
+
+            session._show_apply_summary()
+            session._sent_messages.clear()
+
+            keep_going = session._handle_command("Modify 1")
+
+            self.assertTrue(keep_going)
+            self.assertEqual(session._state, session.STATE_APPLYING)
+            self.assertEqual(session._apply_question_idx, 0)
+            joined = " ".join(session._sent_messages)
+            self.assertIn("current application only", joined)
+            self.assertIn("Email", joined)
+        finally:
+            _cleanup(session)
+
+    def test_modify_answer_does_not_update_saved_profile(self):
+        session = _make_session(new_jobs=[_sample_job()], saved_profile={"email": "saved@example.com"})
+        try:
+            session._current_job = _sample_job()
+            session._state = session.STATE_APPLY_CONFIRM
+            session._apply_in_progress_job_id = session._current_job["id"]
+            session._apply_form_fields = [("email", "✏️ Email:")]
+            session._apply_field_labels = {"email": "Email"}
+            session._apply_field_types = {"email": "text"}
+            session._apply_field_options = {}
+            session._apply_answers = {"email": "saved@example.com"}
+            session._maybe_expand_apply_fields_via_rescan = lambda *_a, **_k: False  # type: ignore[method-assign]
+
+            persisted_snapshots = []
+            session._persist_saved_profile = lambda: persisted_snapshots.append(dict(session._saved_profile))
+
+            session._show_apply_summary()
+            session._handle_command("modify 1")
+            session._handle_apply_answer("edited@example.com")
+
+            self.assertEqual(session._apply_answers.get("email"), "edited@example.com")
+            self.assertEqual(session._saved_profile.get("email"), "saved@example.com")
+            self.assertEqual(persisted_snapshots, [])
+        finally:
+            _cleanup(session)
+
+    def test_modify_command_rejects_out_of_range_number(self):
+        session = _make_session(new_jobs=[_sample_job()])
+        try:
+            session._current_job = _sample_job()
+            session._state = session.STATE_APPLY_CONFIRM
+            session._apply_in_progress_job_id = session._current_job["id"]
+            session._apply_form_fields = [("email", "✏️ Email:")]
+            session._apply_field_labels = {"email": "Email"}
+            session._apply_field_types = {"email": "text"}
+            session._apply_field_options = {}
+            session._apply_answers = {"email": "old@example.com"}
+
+            session._show_apply_summary()
+            session._sent_messages.clear()
+            keep_going = session._handle_command("modify 2")
+
+            self.assertTrue(keep_going)
+            self.assertEqual(session._state, session.STATE_APPLY_CONFIRM)
+            self.assertIn("out of range", " ".join(session._sent_messages))
+        finally:
+            _cleanup(session)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,20 @@ class TestReportModeParsing(unittest.TestCase):
             args = agent_engine.parse_args()
         self.assertTrue(args.easy_apply_only)
 
+    def test_parse_args_defaults_result_filter_mode_to_all(self):
+        with patch.object(sys, "argv", ["agent_engine.py"]):
+            args = agent_engine.parse_args()
+        self.assertEqual(args.result_filter_mode, agent_engine.LinkedInJobAgent.RESULT_FILTER_ALL)
+
+    def test_parse_args_accepts_result_filter_modes(self):
+        for mode in [
+            agent_engine.LinkedInJobAgent.RESULT_FILTER_EASY_APPLY_DO_NOT_APPLY_ONLY,
+            agent_engine.LinkedInJobAgent.RESULT_FILTER_EASY_APPLY_MATCH,
+        ]:
+            with patch.object(sys, "argv", ["agent_engine.py", "--result-filter-mode", mode]):
+                args = agent_engine.parse_args()
+            self.assertEqual(args.result_filter_mode, mode)
+
     def test_parse_args_rejects_legacy_normal_easy_apply_run_mode(self):
         with patch.object(sys, "argv", ["agent_engine.py", "--easy-apply-run-mode", "normal"]):
             with self.assertRaises(SystemExit):
@@ -114,6 +128,105 @@ class TestSearchUrlFilters(unittest.TestCase):
         url = agent.build_search_url()
 
         self.assertNotIn("f_AL=true", url)
+
+    def test_build_search_url_includes_easy_apply_filter_when_result_filter_requires_it(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+
+        agent = agent_engine.LinkedInJobAgent(
+            base_dir=base,
+            max_jobs=5,
+            headless=True,
+            query="Senior C# Developer Israel",
+            user_data_dir=None,
+            max_run_seconds=60,
+            max_extract_seconds=30,
+            per_card_seconds=10,
+            easy_apply_only=False,
+            result_filter_mode=agent_engine.LinkedInJobAgent.RESULT_FILTER_EASY_APPLY_MATCH,
+        )
+        self.addCleanup(agent.db.close)
+        for handler in list(agent.logger.handlers):
+            self.addCleanup(handler.close)
+
+        url = agent.build_search_url()
+        self.assertIn("f_AL=true", url)
+
+
+class TestResultFilterModes(unittest.TestCase):
+    def _make_agent(self, result_filter_mode: str):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+        agent = agent_engine.LinkedInJobAgent(
+            base_dir=base,
+            max_jobs=5,
+            headless=True,
+            query="q",
+            user_data_dir=None,
+            max_run_seconds=60,
+            max_extract_seconds=30,
+            per_card_seconds=10,
+            result_filter_mode=result_filter_mode,
+        )
+        self.addCleanup(agent.db.close)
+        for handler in list(agent.logger.handlers):
+            self.addCleanup(handler.close)
+        return agent
+
+    def _sample_job(self, apply_mode: str):
+        return agent_engine.JobRecord(
+            job_key=f"k-{apply_mode}",
+            title="Backend Engineer",
+            company="Acme",
+            location="Tel Aviv",
+            url=f"https://www.linkedin.com/jobs/view/{abs(hash(apply_mode)) % 100000}/",
+            description="desc",
+            apply_mode=apply_mode,
+        )
+
+    def test_do_not_apply_only_mode_keeps_only_easy_apply_do_not_apply(self):
+        agent = self._make_agent(agent_engine.LinkedInJobAgent.RESULT_FILTER_EASY_APPLY_DO_NOT_APPLY_ONLY)
+
+        with patch("agent_engine.analyze_job_description", return_value=([("Role", "x", "Yes")], "DO NOT APPLY")), patch(
+            "agent_engine.build_test_prompt", return_value="prompt"
+        ):
+            agent.report_job(self._sample_job("Easy Apply"))
+        self.assertEqual(len(agent.report_entries), 1)
+
+        with patch("agent_engine.analyze_job_description", return_value=([("Role", "x", "Yes")], "STRONG MATCH")), patch(
+            "agent_engine.build_test_prompt", return_value="prompt"
+        ):
+            agent.report_job(self._sample_job("Easy Apply"))
+        self.assertEqual(len(agent.report_entries), 1)
+
+        with patch("agent_engine.analyze_job_description", return_value=([("Role", "x", "Yes")], "DO NOT APPLY")), patch(
+            "agent_engine.build_test_prompt", return_value="prompt"
+        ):
+            agent.report_job(self._sample_job("External Apply"))
+        self.assertEqual(len(agent.report_entries), 1)
+
+    def test_easy_apply_match_mode_keeps_match_levels_only(self):
+        agent = self._make_agent(agent_engine.LinkedInJobAgent.RESULT_FILTER_EASY_APPLY_MATCH)
+
+        with patch("agent_engine.analyze_job_description", return_value=([("Role", "x", "Yes")], "STRONG MATCH")), patch(
+            "agent_engine.build_test_prompt", return_value="prompt"
+        ):
+            agent.report_job(self._sample_job("Easy Apply"))
+        self.assertEqual(len(agent.report_entries), 1)
+
+        with patch("agent_engine.analyze_job_description", return_value=([("Role", "x", "Yes")], "DO NOT APPLY")), patch(
+            "agent_engine.build_test_prompt", return_value="prompt"
+        ):
+            agent.report_job(self._sample_job("Easy Apply"))
+        self.assertEqual(len(agent.report_entries), 1)
+
+        with patch("agent_engine.analyze_job_description", return_value=([("Role", "x", "Yes")], "MATCH")), patch(
+            "agent_engine.build_test_prompt", return_value="prompt"
+        ):
+            agent.report_job(self._sample_job("Easy Apply"))
+        self.assertEqual(len(agent.report_entries), 2)
 
 
 class TestJobMetadataPersistence(unittest.TestCase):

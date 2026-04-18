@@ -1374,6 +1374,7 @@ def run_report_mode(args: argparse.Namespace, base_dir: Path) -> None:
         max_extract_seconds=args.max_extract_seconds,
         per_card_seconds=args.per_card_seconds,
         easy_apply_only=args.easy_apply_only,
+        result_filter_mode=args.result_filter_mode,
     )
     try:
         agent.run()
@@ -1497,6 +1498,15 @@ class SkippedJobsMaintenanceTask:
 
 
 class LinkedInJobAgent:
+    RESULT_FILTER_ALL = "all"
+    RESULT_FILTER_EASY_APPLY_DO_NOT_APPLY_ONLY = "easy_apply_do_not_apply_only"
+    RESULT_FILTER_EASY_APPLY_MATCH = "easy_apply_match"
+    RESULT_FILTER_MODES = {
+        RESULT_FILTER_ALL,
+        RESULT_FILTER_EASY_APPLY_DO_NOT_APPLY_ONLY,
+        RESULT_FILTER_EASY_APPLY_MATCH,
+    }
+
     def __init__(
         self,
         base_dir: Path,
@@ -1508,6 +1518,7 @@ class LinkedInJobAgent:
         max_extract_seconds: int,
         per_card_seconds: int,
         easy_apply_only: bool = False,
+        result_filter_mode: str = RESULT_FILTER_ALL,
         keep_db_open: bool = False,
     ):
         self.base_dir = base_dir
@@ -1518,7 +1529,15 @@ class LinkedInJobAgent:
         self.max_run_seconds = max(30, max_run_seconds)
         self.max_extract_seconds = max(0, int(max_extract_seconds))
         self.per_card_seconds = max(5, per_card_seconds)
-        self.easy_apply_only = bool(easy_apply_only)
+        normalized_filter_mode = (result_filter_mode or self.RESULT_FILTER_ALL).strip().lower()
+        if normalized_filter_mode not in self.RESULT_FILTER_MODES:
+            normalized_filter_mode = self.RESULT_FILTER_ALL
+        self.result_filter_mode = normalized_filter_mode
+        force_easy_apply = self.result_filter_mode in {
+            self.RESULT_FILTER_EASY_APPLY_DO_NOT_APPLY_ONLY,
+            self.RESULT_FILTER_EASY_APPLY_MATCH,
+        }
+        self.easy_apply_only = bool(easy_apply_only or force_easy_apply)
         self._search_url_has_easy_apply_filter = False
         self.keep_db_open = keep_db_open
         self.logger = build_logger(base_dir)
@@ -1678,6 +1697,34 @@ class LinkedInJobAgent:
         if not self.easy_apply_only:
             return True
         return normalized_mode == ProcessedJobsDB.APPLY_MODE_EASY
+
+    @staticmethod
+    def _is_do_not_apply_recommendation(recommendation: str) -> bool:
+        normalized = normalize_space(recommendation or "").lower()
+        return normalized == "do not apply" or "do not apply" in normalized
+
+    @staticmethod
+    def _is_match_level_recommendation(recommendation: str) -> bool:
+        normalized = normalize_space(recommendation or "").lower()
+        if not normalized:
+            return False
+        if "do not apply" in normalized:
+            return False
+        return "match" in normalized
+
+    def _should_include_report_result(self, recommendation: str, apply_mode: str) -> bool:
+        if self.result_filter_mode == self.RESULT_FILTER_ALL:
+            return True
+
+        normalized_mode = ProcessedJobsDB.normalize_apply_mode(apply_mode)
+        if normalized_mode != ProcessedJobsDB.APPLY_MODE_EASY:
+            return False
+
+        if self.result_filter_mode == self.RESULT_FILTER_EASY_APPLY_DO_NOT_APPLY_ONLY:
+            return self._is_do_not_apply_recommendation(recommendation)
+        if self.result_filter_mode == self.RESULT_FILTER_EASY_APPLY_MATCH:
+            return self._is_match_level_recommendation(recommendation)
+        return True
 
     def _card_has_easy_apply_badge(self, card: Any) -> bool:
         badge_selectors = [
@@ -2092,6 +2139,7 @@ class LinkedInJobAgent:
                 f"<div class='param'><strong>Query</strong><br>{html.escape(self.query)}</div>",
                 f"<div class='param'><strong>Headless</strong><br>{html.escape(str(self.headless))}</div>",
                 f"<div class='param'><strong>Easy Apply Only</strong><br>{html.escape(str(self.easy_apply_only))}</div>",
+                f"<div class='param'><strong>Result Filter Mode</strong><br>{html.escape(self.result_filter_mode)}</div>",
                 f"<div class='param'><strong>Max Jobs</strong><br>{self.max_jobs}</div>",
                 f"<div class='param'><strong>Max Run Seconds</strong><br>{self.max_run_seconds}</div>",
                 f"<div class='param'><strong>Max Extract Seconds</strong><br>{self.max_extract_seconds}</div>",
@@ -2455,6 +2503,25 @@ class LinkedInJobAgent:
             title=job.title,
             company=job.company,
         )
+        normalized_apply_mode = ProcessedJobsDB.normalize_apply_mode(job.apply_mode)
+
+        self.db.upsert_job_metadata(
+            job_key=job.job_key,
+            recommendation=recommendation,
+            apply_mode=job.apply_mode,
+        )
+
+        if not self._should_include_report_result(recommendation=recommendation, apply_mode=normalized_apply_mode):
+            self.log_step(
+                "4.0",
+                (
+                    "Filtered analyzed job from run results by result-filter-mode: "
+                    f"{self.result_filter_mode} | {job.title} @ {job.company} "
+                    f"(apply mode: {normalized_apply_mode}, recommendation: {recommendation})"
+                ),
+            )
+            return
+
         table = markdown_table(rows)
 
         report_block = (
@@ -2482,14 +2549,9 @@ class LinkedInJobAgent:
                 "location": job.location,
                 "url": job.url,
                 "recommendation": recommendation,
-                "apply_mode": ProcessedJobsDB.normalize_apply_mode(job.apply_mode),
+                "apply_mode": normalized_apply_mode,
                 "rows": rows,
             }
-        )
-        self.db.upsert_job_metadata(
-            job_key=job.job_key,
-            recommendation=recommendation,
-            apply_mode=job.apply_mode,
         )
 
     def run(self) -> None:
@@ -2612,6 +2674,7 @@ class TelegramJobSession:
     apply   – start application Q&A flow (collects data, then shows summary)
     submit  – (after summary) fill & submit LinkedIn Easy Apply form; mark Applied only on success
     preview – (after summary) fill LinkedIn Easy Apply form and stop before Submit for visual review
+    modify N – (after summary) edit answer #N for this application only
     skip    – mark current job Skipped
     startover – restart chat session from intro and browse this run from the start
     done    – terminate session (process exits)
@@ -2737,6 +2800,8 @@ class TelegramJobSession:
         self._apply_scan_unverified: bool = False
         self._apply_field_options: Dict[str, List[str]] = {}
         self._apply_field_types: Dict[str, str] = {}
+        self._apply_summary_index_to_field_key: Dict[int, str] = {}
+        self._apply_non_persistent_override_keys: set[str] = set()
         self._option_resolution_state: Optional[Dict[str, Any]] = None
         self._submission_audit_logged: bool = False
         self._return_state_after_apply: str = self.STATE_INTRO
@@ -3142,13 +3207,18 @@ class TelegramJobSession:
             )
             return ranked[0][1]
 
-        def _consolidate_custom_aliases(label: str, key_prefixes: List[str]) -> None:
+        def _consolidate_custom_aliases(
+            label: str,
+            key_prefixes: List[str],
+            canonical_key: Optional[str] = None,
+        ) -> None:
             nonlocal changed
 
-            canonical_key = self._custom_key_from_label(label)
+            canonical_key = (canonical_key or self._custom_key_from_label(label)).strip()
             candidate_items: List[Tuple[str, str]] = []
             for key, value in list(self._saved_profile.items()):
-                if not any(key.startswith(prefix) for prefix in key_prefixes):
+                is_alias = any(key.startswith(prefix) for prefix in key_prefixes)
+                if not is_alias and key != canonical_key:
                     continue
                 cleaned = (value or "").strip()
                 if cleaned:
@@ -3164,7 +3234,7 @@ class TelegramJobSession:
             keys_to_remove = {
                 key
                 for key in list(self._saved_profile.keys())
-                if any(key.startswith(prefix) for prefix in key_prefixes)
+                if key != canonical_key and any(key.startswith(prefix) for prefix in key_prefixes)
             }
             for key in keys_to_remove:
                 if key in self._saved_profile:
@@ -3178,6 +3248,7 @@ class TelegramJobSession:
         _consolidate_custom_aliases(
             label="Phone country code",
             key_prefixes=["custom__phone_country_code"],
+            canonical_key="phone_country_code",
         )
 
         return changed
@@ -3531,10 +3602,9 @@ class TelegramJobSession:
         def _profile_key_for(label: str) -> Optional[str]:
             label_lower = label.lower()
 
-            # Phone country code must remain a dedicated custom field; mapping it
-            # to the generic phone key creates unstable duplicate keys across scans.
+            # Phone country code uses a dedicated stable profile key.
             if "phone country code" in label_lower:
-                return None
+                return "phone_country_code"
 
             for pattern, key in self.LABEL_TO_PROFILE_KEY:
                 if pattern.search(label_lower):
@@ -6043,10 +6113,14 @@ class TelegramJobSession:
                     return self._cmd_submit_apply()
                 if cmd in {"preview", "review"}:
                     return self._cmd_preview_apply()
+                modify_match = re.fullmatch(r"modify\s+(\d+)", cmd)
+                if modify_match:
+                    return self._cmd_modify_apply(int(modify_match.group(1)))
                 jid = self._apply_in_progress_job_id
                 self._send(
                     "⚠️ Review the summary above and reply <b>Preview</b> to open/fill and stop before submit, "
-                    "<b>Submit</b> to apply now, or <b>Cancel</b> to abort."
+                    "<b>Submit</b> to apply now, <b>Modify N</b> to edit answer #N for this application, "
+                    "or <b>Cancel</b> to abort."
                 )
                 return True
 
@@ -6127,6 +6201,8 @@ class TelegramJobSession:
         self._apply_asked_field_keys = []
         self._apply_form_fields = []
         self._apply_field_labels = {}
+        self._apply_summary_index_to_field_key = {}
+        self._apply_non_persistent_override_keys = set()
         self._last_preview_browser_snapshot = []
         self._apply_scan_unverified = False
         self._submission_audit_logged = False
@@ -6304,6 +6380,8 @@ class TelegramJobSession:
         self._return_state_after_apply = self._state
         self._state = self.STATE_APPLYING
         self._apply_answers = {}
+        self._apply_summary_index_to_field_key = {}
+        self._apply_non_persistent_override_keys = set()
         self._option_resolution_state = None
         self._submission_audit_logged = False
         for field_key, _prompt in self._apply_form_fields:
@@ -6431,6 +6509,8 @@ class TelegramJobSession:
         self._apply_question_idx = 0
         self._apply_form_fields = []
         self._apply_field_labels = {}
+        self._apply_summary_index_to_field_key = {}
+        self._apply_non_persistent_override_keys = set()
         self._last_preview_browser_snapshot = []
         self._apply_scan_unverified = False
         self._submission_audit_logged = False
@@ -6439,6 +6519,49 @@ class TelegramJobSession:
             f"🚫 Application for job ID <code>{jid}</code> cancelled.\n\n"
             "Reply <b>Next</b> | <b>Done</b> | <b>db</b>"
         )
+        return True
+
+    def _cmd_modify_apply(self, question_number: int) -> bool:
+        """Jump back to one summary question and re-ask it for this application only."""
+        if self._state != self.STATE_APPLY_CONFIRM:
+            self._send("ℹ️ Modify is available only after the application summary is shown.")
+            return True
+
+        if question_number <= 0:
+            self._send("⚠️ Invalid question number. Use <b>Modify N</b> where N starts at 1.")
+            return True
+
+        field_key = self._apply_summary_index_to_field_key.get(question_number)
+        if not field_key:
+            total_questions = len(self._apply_summary_index_to_field_key)
+            self._send(
+                f"⚠️ Q{question_number} is out of range. "
+                f"Available summary question numbers: 1-{max(total_questions, 1)}."
+            )
+            return True
+
+        field_index = -1
+        for idx, (candidate_key, _prompt) in enumerate(self._apply_form_fields):
+            if candidate_key == field_key:
+                field_index = idx
+                break
+
+        if field_index < 0:
+            self._send("⚠️ Could not locate that question in the current form state. Re-open Apply and try again.")
+            return True
+
+        label = self._apply_field_labels.get(field_key, field_key)
+        self._apply_non_persistent_override_keys.add(field_key)
+        self._apply_answers.pop(field_key, None)
+        self._state = self.STATE_APPLYING
+        self._apply_question_idx = field_index
+        self._option_resolution_state = None
+
+        self._send(
+            f"✏️ Modifying Q{question_number}: <b>{html.escape(label)}</b>.\n"
+            "This answer update applies to the current application only and does <b>not</b> update saved profile cache."
+        )
+        self._send_current_apply_prompt()
         return True
 
     def _handle_apply_answer(self, answer: str) -> bool:
@@ -6466,9 +6589,13 @@ class TelegramJobSession:
 
         self._apply_answers[key] = normalized_answer
         self._option_resolution_state = None
-        # Persist all answers, including stable custom question keys.
-        self._saved_profile[key] = normalized_answer
-        self._persist_saved_profile()
+        if key in self._apply_non_persistent_override_keys:
+            # Modify N updates are intentionally scoped to this application only.
+            self._apply_non_persistent_override_keys.discard(key)
+        else:
+            # Persist all non-modified answers, including stable custom question keys.
+            self._saved_profile[key] = normalized_answer
+            self._persist_saved_profile()
         self._apply_question_idx += 1
 
         while self._apply_question_idx < len(self._apply_form_fields):
@@ -6798,14 +6925,19 @@ class TelegramJobSession:
             existing = deduped_rows.get(dedupe_key)
             if existing is None or candidate_score > int(existing.get("score", 0)):
                 deduped_rows[dedupe_key] = {
+                    "field_key": field_key,
                     "label": canonical_label or label,
                     "value": value,
                     "score": candidate_score,
                 }
 
+        self._apply_summary_index_to_field_key = {}
         submission_lines: List[str] = []
         for idx, dedupe_key in enumerate(dedupe_order, 1):
             row = deduped_rows.get(dedupe_key, {})
+            row_field_key = str(row.get("field_key") or "")
+            if row_field_key:
+                self._apply_summary_index_to_field_key[idx] = row_field_key
             display_label = str(row.get("label") or "")
             display_value = str(row.get("value") or "").strip() or "(not provided)"
             submission_lines.append(f"• Q{idx}: <b>{html.escape(display_label)}</b>: {html.escape(display_value)}")
@@ -6845,6 +6977,7 @@ class TelegramJobSession:
             + verification_note
             + prefill_launch_note
             + "\n\n"
+            "Optional command: <b>Modify N</b> to edit answer #N for this application only (saved profile is unchanged).\n"
             "Reply <b>Preview</b> to fill and stop on the final review page (no submit), "
             "or <b>Submit</b> to fill &amp; submit the form on LinkedIn, "
             "or <b>Cancel</b> to abort."
@@ -7029,6 +7162,8 @@ class TelegramJobSession:
         self._apply_asked_field_keys = []
         self._apply_form_fields = []
         self._apply_field_labels = {}
+        self._apply_summary_index_to_field_key = {}
+        self._apply_non_persistent_override_keys = set()
         self._last_preview_browser_snapshot = []
         self._apply_scan_unverified = False
         self._submission_audit_logged = False
@@ -7927,6 +8062,87 @@ class TelegramJobSession:
                 except Exception:
                     continue
 
+            def _radio_option_label(control: Any) -> str:
+                option_label = ""
+                try:
+                    control_id = (control.get_attribute("id", timeout=250) or "").strip()
+                except Exception:
+                    control_id = ""
+
+                if control_id:
+                    try:
+                        option = page.locator(f"label[for='{control_id}']").first
+                        if option.count() > 0:
+                            option_label = normalize_form_label(option.inner_text(timeout=300) or "")
+                    except Exception:
+                        pass
+
+                if not option_label:
+                    try:
+                        wrapper = control.locator("xpath=ancestor::label[1]").first
+                        if wrapper.count() > 0:
+                            option_label = normalize_form_label(wrapper.inner_text(timeout=300) or "")
+                    except Exception:
+                        pass
+
+                if not option_label:
+                    try:
+                        option_label = normalize_form_label(control.get_attribute("aria-label", timeout=250) or "")
+                    except Exception:
+                        option_label = ""
+
+                return option_label
+
+            def _radio_question_label(first_radio: Any) -> str:
+                label_text = ""
+                try:
+                    container_text = first_radio.locator(
+                        "xpath=ancestor::*[@role='radiogroup' or self::fieldset or contains(@class, 'fb-dash-form-element') or contains(@class, 'jobs-easy-apply-form-section__grouping')][1]"
+                    ).inner_text(timeout=400)
+                    label_text = extract_question_label_from_block_text(container_text)
+                except Exception:
+                    label_text = ""
+
+                if not label_text:
+                    try:
+                        label_text = _get_label(first_radio)
+                    except Exception:
+                        label_text = ""
+
+                return normalize_form_label(label_text)
+
+            def _radio_option_matches(desired_value: str, option_label: str, option_value: str) -> bool:
+                desired = normalize_form_label(desired_value).lower()
+                label = normalize_form_label(option_label).lower()
+                value = normalize_form_label(option_value).lower()
+                if not desired:
+                    return False
+
+                if desired in {"yes", "y", "true", "1"}:
+                    return (
+                        value in {"yes", "y", "true", "1"}
+                        or label == "yes"
+                        or label.startswith("yes ")
+                        or " yes " in f" {label} "
+                    )
+                if desired in {"no", "n", "false", "2"}:
+                    return (
+                        value in {"no", "n", "false", "0", "2"}
+                        or label == "no"
+                        or label.startswith("no ")
+                        or " no " in f" {label} "
+                    )
+
+                if desired == label or desired == value:
+                    return True
+                if desired and desired in label:
+                    return True
+                if desired and desired in value:
+                    return True
+                return False
+
+            handled_radio_names: set[str] = set()
+
             for fieldset in page.locator("fieldset").all():
                 try:
                     if not fieldset.is_visible(timeout=500):
@@ -7943,22 +8159,124 @@ class TelegramJobSession:
                     if not desired:
                         continue
 
-                    for control in fieldset.locator("input[type='radio'], input[type='checkbox']").all():
+                    radios = fieldset.locator("input[type='radio']")
+                    for idx in range(radios.count()):
                         try:
-                            control_id = control.get_attribute("id", timeout=400) or ""
-                            option_label = ""
-                            if control_id:
-                                option = page.locator(f"label[for='{control_id}']").first
-                                if option.count() > 0:
-                                    option_label = (option.inner_text(timeout=400) or "").strip().lower()
+                            radio_name = (radios.nth(idx).get_attribute("name", timeout=200) or "").strip()
+                            if radio_name:
+                                handled_radio_names.add(radio_name)
+                        except Exception:
+                            continue
+
+                    for control in radios.all():
+                        try:
+                            option_label = _radio_option_label(control)
                             option_value = (control.get_attribute("value", timeout=400) or "").strip().lower()
-                            if desired in option_label or desired == option_value:
-                                try:
-                                    control.check(timeout=2000)
-                                except Exception:
-                                    control.click(timeout=2000)
-                                self.logger.info(f"Easy Apply: selected '{desired}' for '{legend}'")
+                            if _radio_option_matches(desired, option_label, option_value):
+                                selected = self._scan_try_select_radio_input(
+                                    radio_input=control,
+                                    root=page,
+                                    question_label=legend,
+                                    testing_mode=False,
+                                )
+                                if selected:
+                                    self.logger.info(f"Easy Apply: selected '{option_label or option_value}' for '{legend}'")
                                 break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # Standalone radio groups by name (outside fieldset)
+            for radio in page.locator("input[type='radio']").all():
+                try:
+                    name = (radio.get_attribute("name", timeout=250) or "").strip()
+                    if not name or name in handled_radio_names:
+                        continue
+                    handled_radio_names.add(name)
+
+                    group = page.locator(f"input[type='radio'][name='{name}']")
+                    if group.count() == 0:
+                        continue
+
+                    question_label = _radio_question_label(group.first)
+                    desired = (
+                        self._resolve_apply_answer(
+                            question_label,
+                            answers,
+                            hints=[question_label, name],
+                        )
+                        or ""
+                    ).strip().lower()
+                    if not desired:
+                        continue
+
+                    selected = False
+                    for idx in range(group.count()):
+                        try:
+                            control = group.nth(idx)
+                            option_label = _radio_option_label(control)
+                            option_value = (control.get_attribute("value", timeout=250) or "").strip().lower()
+                            if not _radio_option_matches(desired, option_label, option_value):
+                                continue
+                            selected = self._scan_try_select_radio_input(
+                                radio_input=control,
+                                root=page,
+                                question_label=question_label,
+                                testing_mode=False,
+                            )
+                            if selected:
+                                self.logger.info(
+                                    f"Easy Apply: selected '{option_label or option_value}' for '{question_label or name}'"
+                                )
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # ARIA-based radio groups (custom controls)
+            for rg in page.locator("[role='radiogroup']").all():
+                try:
+                    if not rg.is_visible(timeout=300):
+                        continue
+
+                    question_label = ""
+                    try:
+                        question_label = extract_question_label_from_block_text(rg.inner_text(timeout=400) or "")
+                    except Exception:
+                        question_label = ""
+                    if not question_label:
+                        try:
+                            question_label = normalize_form_label(rg.get_attribute("aria-label", timeout=200) or "")
+                        except Exception:
+                            question_label = ""
+
+                    desired = (self._resolve_apply_answer(question_label, answers, hints=[question_label]) or "").strip().lower()
+                    if not desired:
+                        continue
+
+                    options = rg.locator("[role='radio']")
+                    if options.count() == 0:
+                        continue
+
+                    for idx in range(options.count()):
+                        try:
+                            option = options.nth(idx)
+                            if not option.is_visible(timeout=200):
+                                continue
+                            option_label = normalize_form_label(
+                                (option.inner_text(timeout=250) or "").strip()
+                                or (option.get_attribute("aria-label", timeout=250) or "").strip()
+                            )
+                            option_value = (option.get_attribute("data-test-text-selectable-option__label", timeout=250) or "").strip()
+                            if not _radio_option_matches(desired, option_label, option_value):
+                                continue
+                            option.click(timeout=2000)
+                            self.logger.info(
+                                f"Easy Apply: selected ARIA radio '{option_label or option_value}' for '{question_label}'"
+                            )
+                            break
                         except Exception:
                             continue
                 except Exception:
@@ -8159,6 +8477,7 @@ TelegramJobSession.LABEL_TO_PROFILE_KEY = [
     (re.compile(r"last.?name",                  re.I), "full_name"),
     (re.compile(r"full.?name|your name",        re.I), "full_name"),
     (re.compile(r"email",                       re.I), "email"),
+    (re.compile(r"phone\s*country\s*code|mobile\s*country\s*code", re.I), "phone_country_code"),
     (re.compile(r"\bphone\b|\bmobile(?!ye)\b", re.I), "phone"),
     (re.compile(r"city|location|address",       re.I), "location"),
     (re.compile(r"linkedin\s*(profile\s*)?url|url\s*(for\s*)?linkedin", re.I), "linkedin"),
@@ -8306,6 +8625,20 @@ def parse_args() -> argparse.Namespace:
         help="Discover only jobs classified as Easy Apply during search",
     )
     parser.add_argument(
+        "--result-filter-mode",
+        type=str,
+        choices=[
+            LinkedInJobAgent.RESULT_FILTER_ALL,
+            LinkedInJobAgent.RESULT_FILTER_EASY_APPLY_DO_NOT_APPLY_ONLY,
+            LinkedInJobAgent.RESULT_FILTER_EASY_APPLY_MATCH,
+        ],
+        default=LinkedInJobAgent.RESULT_FILTER_ALL,
+        help=(
+            "Filter run results after recommendation analysis: "
+            "all | easy_apply_do_not_apply_only | easy_apply_match"
+        ),
+    )
+    parser.add_argument(
         "--telegram-notify",
         action="store_true",
         help=(
@@ -8410,6 +8743,7 @@ def main() -> None:
         max_extract_seconds=args.max_extract_seconds,
         per_card_seconds=args.per_card_seconds,
         easy_apply_only=args.easy_apply_only,
+        result_filter_mode=args.result_filter_mode,
         keep_db_open=args.telegram_notify,
     )
     agent.run()
