@@ -424,6 +424,178 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertEqual(session._apply_answers.get("custom__location"), "Bangalore, India")
         self.assertEqual(session._apply_question_idx, 1)
 
+    def test_location_select_uses_option_protocol(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+        session._persist_saved_profile = lambda: None
+
+        session._state = session.STATE_APPLYING
+        session._current_job = {"id": 1, "title": "Role", "company": "Comp", "url": "https://www.linkedin.com/jobs/view/1/"}
+        session._apply_form_fields = [
+            ("location", "🔽 Location (city):"),
+            ("full_name", "✍️ Full name:"),
+        ]
+        session._apply_field_types = {"location": "select", "full_name": "text"}
+        session._apply_field_options = {
+            "location": [
+                "Tel Aviv",
+                "Jerusalem",
+                "Haifa",
+            ]
+        }
+        session._apply_answers = {}
+        session._apply_question_idx = 0
+
+        session._send_current_apply_prompt()
+        session._handle_apply_answer("Aviv")
+
+        self.assertIsNone(session._apply_answers.get("location"))
+        self.assertIn("Only a numbered reply finalizes", sent_messages[-1])
+
+        session._handle_apply_answer("1")
+        self.assertEqual(session._apply_answers.get("location"), "Tel Aviv")
+        self.assertEqual(session._apply_question_idx, 1)
+
+    def test_location_city_rejects_partial_value_without_dropdown_options(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+        session._persist_saved_profile = lambda: None
+
+        session._state = session.STATE_APPLYING
+        session._current_job = {"id": 1, "title": "Role", "company": "Comp", "url": "https://www.linkedin.com/jobs/view/1/"}
+        session._apply_form_fields = [
+            ("location", "✏️ Location (city):"),
+            ("full_name", "✍️ Full name:"),
+        ]
+        session._apply_field_labels = {
+            "location": "Location (city)",
+            "full_name": "Full name",
+        }
+        session._apply_field_types = {"location": "text", "full_name": "text"}
+        session._apply_field_options = {}
+        session._apply_answers = {}
+        session._apply_question_idx = 0
+
+        session._handle_apply_answer("Aviv")
+
+        self.assertNotIn("location", session._apply_answers)
+        self.assertEqual(session._apply_question_idx, 0)
+        self.assertIn("Location (city) looks incomplete", sent_messages[-2])
+
+        session._handle_apply_answer("Tel Aviv")
+        self.assertEqual(session._apply_answers.get("location"), "Tel Aviv")
+        self.assertEqual(session._apply_question_idx, 1)
+
+    def test_apply_summary_always_includes_cv_context(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+        session._register_prefill_launch = lambda **_kwargs: ""  # type: ignore[method-assign]
+
+        session._current_job = {
+            "id": 1,
+            "title": "Role",
+            "company": "Comp",
+            "url": "https://www.linkedin.com/jobs/view/1/",
+        }
+        session._apply_form_fields = [
+            ("location", "✏️ Location (city):"),
+            ("email", "✏️ Email:"),
+        ]
+        session._apply_field_labels = {
+            "location": "Location (city)",
+            "email": "Email address",
+        }
+        session._apply_field_types = {
+            "location": "text",
+            "email": "email",
+        }
+        session._apply_field_options = {}
+        session._apply_answers = {
+            "location": "Tel Aviv",
+            "email": "ariel@example.com",
+        }
+        session._saved_profile = {
+            "cv_path": r"C:\MyData\Ariel CV - 2026 [2].pdf",
+        }
+
+        self.assertTrue(session._show_apply_summary())
+        summary_text = sent_messages[-1]
+
+        self.assertIn("CV candidate for upload", summary_text)
+        self.assertIn(r"C:\MyData\Ariel CV - 2026 [2].pdf", summary_text)
+
+    def test_cover_letter_none_counts_as_answered_not_missing(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+        session._persist_saved_profile = lambda: None
+
+        session._state = session.STATE_APPLYING
+        session._current_job = {"id": 1, "title": "Role", "company": "Comp", "url": "https://www.linkedin.com/jobs/view/1/"}
+        session._apply_form_fields = [
+            ("cover_letter_path", "📝 Cover letter file path"),
+            ("full_name", "✍️ Full name:"),
+        ]
+        session._apply_field_types = {"cover_letter_path": "file", "full_name": "text"}
+        session._apply_field_options = {}
+        session._apply_answers = {}
+        session._apply_question_idx = 0
+        session._maybe_expand_apply_fields_via_rescan = lambda *_a, **_k: False  # type: ignore[method-assign]
+
+        session._handle_apply_answer("none")
+
+        self.assertIn("cover_letter_path", session._apply_answers)
+        self.assertEqual(session._apply_answers.get("cover_letter_path"), "")
+        self.assertEqual(session._apply_question_idx, 1)
+
+    def test_rescan_keeps_explicit_blank_answers_and_drops_stale_unanswered_fields(self):
+        session = self._make_session()
+        session._easy_apply_run_mode = "search"
+        session._current_job = {
+            "id": 8,
+            "title": "Role",
+            "company": "Comp",
+            "url": "https://www.linkedin.com/jobs/view/1/",
+        }
+
+        session._apply_form_fields = [
+            ("cover_letter_path", "cover"),
+            ("custom__how_did_you_hear", "hear"),
+            ("email", "email"),
+        ]
+        session._apply_field_labels = {
+            "cover_letter_path": "Cover letter file path",
+            "custom__how_did_you_hear": "How did you hear about us?",
+            "email": "Email address",
+        }
+        session._apply_field_types = {
+            "cover_letter_path": "file",
+            "custom__how_did_you_hear": "text",
+            "email": "email",
+        }
+        session._apply_field_options = {}
+        session._apply_answers = {
+            "cover_letter_path": "",
+            "email": "ariel.samin@gmail.com",
+        }
+        session._apply_asked_field_keys = ["cover_letter_path", "custom__how_did_you_hear", "email"]
+        session._apply_question_idx = 0
+
+        session._scan_easy_apply_fields = lambda _url, seed_answers=None: [
+            ("email", "Email address", "email"),
+        ]
+
+        _ = session._maybe_expand_apply_fields_via_rescan(session._current_job["url"])
+
+        keys = [k for k, _ in session._apply_form_fields]
+        self.assertIn("cover_letter_path", keys)
+        self.assertNotIn("custom__how_did_you_hear", keys)
+        self.assertIn("cover_letter_path", session._apply_answers)
+        self.assertEqual(session._apply_answers.get("cover_letter_path"), "")
+
     def test_prune_invalid_prefilled_option_answers_removes_stale_value(self):
         session = self._make_session()
         session._persist_saved_profile = lambda: None
@@ -439,6 +611,38 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertIn("In which country are you currently based?", invalid_labels)
         self.assertNotIn("custom__country", session._apply_answers)
         self.assertNotIn("custom__country", session._saved_profile)
+
+    def test_prune_invalid_prefilled_answers_reasks_incomplete_city(self):
+        session = self._make_session()
+        session._persist_saved_profile = lambda: None
+        session._apply_form_fields = [("location", "prompt")]
+        session._apply_field_labels = {"location": "Location (city)"}
+        session._apply_field_types = {"location": "text"}
+        session._apply_field_options = {}
+        session._apply_answers = {"location": "Aviv"}
+        session._saved_profile = {"location": "Aviv"}
+
+        invalid_labels = session._prune_invalid_prefilled_answers()
+
+        self.assertIn("Location (city)", invalid_labels)
+        self.assertNotIn("location", session._apply_answers)
+        self.assertNotIn("location", session._saved_profile)
+
+    def test_prune_invalid_prefilled_answers_keeps_valid_city(self):
+        session = self._make_session()
+        session._persist_saved_profile = lambda: None
+        session._apply_form_fields = [("location", "prompt")]
+        session._apply_field_labels = {"location": "Location (city)"}
+        session._apply_field_types = {"location": "text"}
+        session._apply_field_options = {}
+        session._apply_answers = {"location": "Tel Aviv"}
+        session._saved_profile = {"location": "Tel Aviv"}
+
+        invalid_labels = session._prune_invalid_prefilled_answers()
+
+        self.assertEqual([], invalid_labels)
+        self.assertEqual("Tel Aviv", session._apply_answers.get("location"))
+        self.assertEqual("Tel Aviv", session._saved_profile.get("location"))
 
     def test_load_profile_consolidates_phone_country_code_alias_keys(self):
         temp_dir = tempfile.TemporaryDirectory()

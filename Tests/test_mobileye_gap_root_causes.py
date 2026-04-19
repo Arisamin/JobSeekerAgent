@@ -217,6 +217,26 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("self._fill_easy_apply_modal(page, bootstrap_answers, synthetic_cv)", src)
         self.assertIn("bootstrap_answers", src)
 
+    def test_scan_path_extracts_combobox_options_for_protocol(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn('for cb in root.locator("[role=\'combobox\']").all():', src)
+        self.assertIn('option_nodes = page.locator("[role=\'option\']")', src)
+        self.assertIn('_add(key, label, "select", options=options)', src)
+        self.assertNotIn('page.keyboard.press("Escape")', src)
+
+    def test_scan_path_extracts_location_typeahead_options_for_protocol(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("def _collect_linkedin_typeahead_options", src)
+        self.assertIn("data-test-single-typeahead-entity-form-search-result", src)
+        self.assertIn(".search-typeahead-v2__hit--autocomplete", src)
+        self.assertIn('_add(key, label, "select", options=typeahead_options)', src)
+
+    def test_scan_path_handles_discard_confirmation_overlay_before_next_click(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("def _dismiss_discard_confirmation_if_present", src)
+        self.assertIn("Scan: dismissed discard confirmation overlay", src)
+        self.assertIn("if _dismiss_discard_confirmation_if_present(scan_page):", src)
+
     def test_scan_select_prefill_skips_select_an_option_placeholder(self):
         src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
         self.assertIn("select an option", src)
@@ -247,6 +267,14 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("force_headed=False", submit_src)
         self.assertIn("_log_submission_payload_once", do_apply_src)
         self.assertIn("_log_submission_payload_once", external_src)
+
+    def test_submit_flow_dismisses_typeahead_overlay_before_next_click(self):
+        do_apply_src = inspect.getsource(agent_engine.TelegramJobSession._do_linkedin_easy_apply)
+
+        self.assertIn("def _dismiss_typeahead_overlay_if_present", do_apply_src)
+        self.assertIn("data-test-single-typeahead-entity-form-search-result", do_apply_src)
+        self.assertIn("Easy Apply: dismissed typeahead overlay via Enter", do_apply_src)
+        self.assertIn("if _dismiss_typeahead_overlay_if_present():", do_apply_src)
 
     def test_submit_flow_handles_hidden_resume_inputs_and_logs_filename(self):
         fill_src = inspect.getsource(agent_engine.TelegramJobSession._fill_easy_apply_modal)

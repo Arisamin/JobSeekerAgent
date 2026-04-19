@@ -54,6 +54,8 @@ flowchart TD
 
 - Easy Apply remains wizard-driven and uses modal step progression semantics.
 - Wizard fill handles radio controls in fieldset groups, standalone name-based groups, and ARIA radiogroups.
+- Dropdown combobox scans collect visible options so `select` prompts use numbered option protocol.
+- Explicit skip answers (for example `none` for cover letter path) are treated as answered values during apply progression/rescan.
 - External Apply flow can be same-tab or popup/new-tab and is scanned as a page form, not a modal wizard.
 - Dynamic rescans are answer-seeded so later pages become discoverable.
 - Summary stage supports `Modify N` to update one answer for the current application only (saved profile remains unchanged).

@@ -1,4 +1,26 @@
 [Copilot] 2026-04-18
+- Fixed three regressions from latest JFrog/manual run (`Logs/run_20260418_211758.log`):
+  1) Cover letter answered as `none` kept reappearing.
+     - Root cause: empty-string answers were treated as "missing" in progression/rescan paths.
+     - Fix: added explicit-answer helper (`_has_apply_answer`) and switched missing checks to key-presence semantics.
+  2) Stale form fields re-asked after rescan drift.
+     - Root cause: rescan merge kept all prior discovered keys even when they disappeared from live form.
+     - Fix: drop disappeared unanswered keys; preserve fields that were already answered (including intentionally blank).
+  3) `Location (city)` dropdown did not use option protocol.
+     - Root cause: combobox scan path recorded `select` type but did not extract option values.
+     - Fix: combobox scanner now opens dropdown, collects visible `[role='option']` entries, and stores them for numbered protocol.
+- Added regression tests:
+  - `Tests/test_easy_apply_testing_mode.py`:
+    - `test_location_select_uses_option_protocol`
+    - `test_cover_letter_none_counts_as_answered_not_missing`
+    - `test_rescan_keeps_explicit_blank_answers_and_drops_stale_unanswered_fields`
+  - `Tests/test_mobileye_gap_root_causes.py`:
+    - `test_scan_path_extracts_combobox_options_for_protocol`
+- Validation evidence:
+  - `Tests/test_easy_apply_testing_mode.py` + `Tests/test_mobileye_gap_root_causes.py`: 71 passed
+  - `Tests/test_chat_flow_regression.py`: 24 passed
+
+[Copilot] 2026-04-18
 - Investigated runtime failure where Easy Apply submit/preview stalled on step 4 for question:
   - "Are you able to work in a hybrid schedule based in Tel Aviv..."
 - Evidence from latest run log (`Logs/run_20260418_124947.log`):

@@ -3503,6 +3503,35 @@ class TelegramJobSession:
             if ftype == "url" or "linkedin" in label_lower or "github" in label_lower or "website" in label_lower:
                 return bool(re.match(r"^https?://", candidate.lower()))
 
+            if "city" in label_lower or "location" in label_lower:
+                normalized_city = normalize_form_label(candidate)
+                city_parts = [part for part in normalized_city.split() if part]
+                if not city_parts:
+                    return False
+                if len(city_parts) >= 2:
+                    return True
+                known_single_city_tokens = {
+                    "haifa",
+                    "jerusalem",
+                    "eilat",
+                    "ashdod",
+                    "netanya",
+                    "holon",
+                    "raanana",
+                    "rehovot",
+                    "modiin",
+                    "hadera",
+                    "london",
+                    "paris",
+                    "berlin",
+                    "rome",
+                    "tokyo",
+                    "singapore",
+                    "dubai",
+                    "bangkok",
+                }
+                return city_parts[0].lower() in known_single_city_tokens
+
             return True
 
         def _label_for(page: Any, inp: Any) -> str:
@@ -3858,6 +3887,52 @@ class TelegramJobSession:
             submit_tokens = self._SUBMIT_BUTTON_TOKENS
             return any(token in haystack for token in submit_tokens)
 
+        def _dismiss_discard_confirmation_if_present(page_obj: Any) -> bool:
+            """Dismiss LinkedIn discard-confirmation overlays that can intercept wizard clicks."""
+            container_selectors = [
+                "[data-test-modal-id='data-test-easy-apply-discard-confirmation']",
+                "[data-test-is-confirm-dialog='true']",
+                ".artdeco-modal-overlay--layer-confirmation",
+            ]
+            for container_sel in container_selectors:
+                try:
+                    container = page_obj.locator(container_sel).first
+                    if container.count() == 0 or not container.is_visible(timeout=200):
+                        continue
+                except Exception:
+                    continue
+
+                # Prefer buttons that keep the application wizard open.
+                keep_selectors = [
+                    f"{container_sel} button:has-text('Continue applying')",
+                    f"{container_sel} button:has-text('Keep applying')",
+                    f"{container_sel} button:has-text('Cancel')",
+                    f"{container_sel} button:has-text('Back')",
+                ]
+                for sel in keep_selectors:
+                    try:
+                        btn = page_obj.locator(sel).first
+                        if btn.count() > 0 and btn.is_visible(timeout=200) and btn.is_enabled(timeout=200):
+                            btn.click(timeout=1200)
+                            page_obj.wait_for_timeout(200)
+                            self.logger.info("Scan: dismissed discard confirmation overlay")
+                            return True
+                    except Exception:
+                        continue
+
+                # Fallback to dismiss/X button if available.
+                for sel in [f"{container_sel} button.artdeco-modal__dismiss", f"{container_sel} button[aria-label*='Dismiss']"]:
+                    try:
+                        btn = page_obj.locator(sel).first
+                        if btn.count() > 0 and btn.is_visible(timeout=200):
+                            btn.click(timeout=1200)
+                            page_obj.wait_for_timeout(200)
+                            self.logger.info("Scan: closed discard confirmation overlay via dismiss fallback")
+                            return True
+                    except Exception:
+                        continue
+            return False
+
         def _scan_step(page: Any, scope: Optional[Any] = None) -> None:
             root = scope if scope is not None else page
 
@@ -3983,6 +4058,80 @@ class TelegramJobSession:
                     pass
 
             # Text / email / tel / textarea inputs
+            def _collect_linkedin_typeahead_options(control: Any, label_text: str) -> List[str]:
+                options: List[str] = []
+                label_lower = normalize_form_label(label_text or "").lower()
+                if "city" not in label_lower and "location" not in label_lower:
+                    return options
+
+                try:
+                    if not control.is_visible(timeout=250):
+                        return options
+                except Exception:
+                    return options
+
+                query_seed = ""
+                try:
+                    query_seed = (control.input_value(timeout=250) or "").strip()
+                except Exception:
+                    query_seed = ""
+                if len(query_seed) < 2:
+                    query_seed = "Tel"
+
+                try:
+                    control.click(timeout=600)
+                    try:
+                        control.fill(query_seed, timeout=800)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(220)
+
+                    suggestion_nodes = page.locator(
+                        "[data-test-single-typeahead-entity-form-search-result='true'], .search-typeahead-v2__hit--autocomplete"
+                    )
+                    suggestion_count = min(suggestion_nodes.count(), 20)
+                    for idx in range(suggestion_count):
+                        try:
+                            node = suggestion_nodes.nth(idx)
+                            if not node.is_visible(timeout=120):
+                                continue
+                            txt = normalize_form_label(node.inner_text(timeout=200) or "")
+                            if not txt:
+                                continue
+                            txt = txt.split("\n", 1)[0].strip()
+                            lowered = txt.lower()
+                            if not lowered:
+                                continue
+                            if lowered in {"select", "choose", "select...", "choose...", "select…", "choose…"}:
+                                continue
+                            if lowered.startswith("select ") or lowered.startswith("choose "):
+                                continue
+                            if any(existing.lower() == lowered for existing in options):
+                                continue
+                            options.append(txt)
+                        except Exception:
+                            continue
+                except Exception:
+                    return options
+                finally:
+                    try:
+                        page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+                    try:
+                        control.evaluate(
+                            "el => { if (el && typeof el.blur === 'function') { el.blur(); } }",
+                            timeout=150,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        page.wait_for_timeout(120)
+                    except Exception:
+                        pass
+
+                return options
+
             sel = (
                 "input[type='text'], input[type='email'], input[type='tel'], input[type='url'], "
                 "input[type='number'], input[type='date'], input:not([type]), textarea"
@@ -4004,7 +4153,11 @@ class TelegramJobSession:
                         ftype = "textarea"
                     pk = _profile_key_for(label)
                     key = pk if pk else self._custom_key_from_label(label)
-                    _add(key, label, ftype)
+                    typeahead_options = _collect_linkedin_typeahead_options(inp, label)
+                    if typeahead_options:
+                        _add(key, label, "select", options=typeahead_options)
+                    else:
+                        _add(key, label, ftype)
                 except Exception:
                     pass
 
@@ -4109,7 +4262,35 @@ class TelegramJobSession:
                         except Exception:
                             source_hint = ""
                         key = _disambiguate_generic_key(key, label, source_hint)
-                    _add(key, label, "select")
+                    options: List[str] = []
+                    try:
+                        cb.click(timeout=1000)
+                        page.wait_for_timeout(200)
+                        option_nodes = page.locator("[role='option']")
+                        option_count = min(option_nodes.count(), 120)
+                        for idx in range(option_count):
+                            try:
+                                opt = option_nodes.nth(idx)
+                                if not opt.is_visible(timeout=120):
+                                    continue
+                                txt = normalize_form_label(opt.inner_text(timeout=200) or "")
+                                if not txt:
+                                    txt = normalize_form_label(opt.get_attribute("aria-label", timeout=120) or "")
+                                if not txt:
+                                    continue
+                                lowered = txt.lower()
+                                if lowered in {"select", "choose", "select...", "choose...", "choose…", "select…"}:
+                                    continue
+                                if lowered.startswith("select ") or lowered.startswith("choose "):
+                                    continue
+                                if any(existing.lower() == lowered for existing in options):
+                                    continue
+                                options.append(txt)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    _add(key, label, "select", options=options)
                 except Exception:
                     continue
 
@@ -4720,10 +4901,9 @@ class TelegramJobSession:
                             pass
 
                     if not picked:
-                        try:
-                            page.keyboard.press("Escape")
-                        except Exception:
-                            pass
+                        # Avoid Escape here: LinkedIn can interpret it as closing the
+                        # Easy Apply modal and raise a discard-confirmation overlay.
+                        pass
                 except Exception:
                     continue
 
@@ -5497,7 +5677,14 @@ class TelegramJobSession:
                             if not _is_advance_action(btn_text, btn_aria):
                                 self.logger.info(f"Scan step {_step}: action is not an advance action, stopping")
                                 break
-                            advance.click(timeout=5000)
+                            _dismiss_discard_confirmation_if_present(scan_page)
+                            try:
+                                advance.click(timeout=5000)
+                            except Exception:
+                                if _dismiss_discard_confirmation_if_present(scan_page):
+                                    advance.click(timeout=5000)
+                                else:
+                                    raise
                             scan_page.wait_for_timeout(1200)
 
                     if scan_flow_type == "easy_apply" and len(discovered) > 0 and easy_apply_step == max_steps - 1:
@@ -5769,9 +5956,14 @@ class TelegramJobSession:
 
     def _first_missing_apply_field_idx(self) -> int:
         for index, (field_key, _prompt) in enumerate(self._apply_form_fields):
-            if not self._apply_answers.get(field_key):
+            if not self._has_apply_answer(field_key):
                 return index
         return len(self._apply_form_fields)
+
+    def _has_apply_answer(self, field_key: str, answers: Optional[Dict[str, str]] = None) -> bool:
+        """Return True when a field was explicitly answered, including intentional blank values."""
+        store = answers if answers is not None else self._apply_answers
+        return field_key in store and store.get(field_key) is not None
 
     def _match_option_exact(self, answer: str, options: List[str]) -> Optional[str]:
         normalized_answer = normalize_form_label(answer or "").lower()
@@ -5823,6 +6015,50 @@ class TelegramJobSession:
                     if legacy_key in self._saved_profile:
                         self._saved_profile.pop(legacy_key, None)
                         touched_profile = True
+
+        if touched_profile:
+            self._persist_saved_profile()
+        return invalid_labels
+
+    def _prune_invalid_prefilled_answers(self) -> List[str]:
+        """Remove saved/prefilled answers that fail current field-level validation."""
+        invalid_labels: List[str] = []
+        touched_profile = False
+
+        for field_key, _prompt in self._apply_form_fields:
+            if not self._has_apply_answer(field_key):
+                continue
+
+            raw_value = self._apply_answers.get(field_key)
+            if raw_value is None:
+                continue
+
+            existing = raw_value.strip() if isinstance(raw_value, str) else str(raw_value).strip()
+
+            # Keep explicit blank answers (for example cover letter = none) as-is.
+            if existing == "":
+                continue
+
+            is_valid, _error_message, normalized_answer = self._validate_apply_answer(field_key, existing)
+            if not is_valid:
+                invalid_labels.append(self._apply_field_labels.get(field_key, field_key))
+                self._apply_answers.pop(field_key, None)
+
+                if field_key in self._saved_profile:
+                    self._saved_profile.pop(field_key, None)
+                    touched_profile = True
+
+                if field_key.startswith("custom__"):
+                    label = self._apply_field_labels.get(field_key, "")
+                    if label:
+                        legacy_key = self._legacy_custom_key_from_label(label)
+                        if legacy_key in self._saved_profile:
+                            self._saved_profile.pop(legacy_key, None)
+                            touched_profile = True
+                continue
+
+            if normalized_answer != existing:
+                self._apply_answers[field_key] = normalized_answer
 
         if touched_profile:
             self._persist_saved_profile()
@@ -5917,6 +6153,35 @@ class TelegramJobSession:
         self._option_resolution_state = None
         self._send(prompt)
 
+    def _is_plausible_city_answer(self, answer: str) -> bool:
+        normalized_city = normalize_form_label(answer or "")
+        city_parts = [part for part in normalized_city.split() if part]
+        if not city_parts:
+            return False
+        if len(city_parts) >= 2:
+            return True
+        known_single_city_tokens = {
+            "haifa",
+            "jerusalem",
+            "eilat",
+            "ashdod",
+            "netanya",
+            "holon",
+            "raanana",
+            "rehovot",
+            "modiin",
+            "hadera",
+            "london",
+            "paris",
+            "berlin",
+            "rome",
+            "tokyo",
+            "singapore",
+            "dubai",
+            "bangkok",
+        }
+        return city_parts[0].lower() in known_single_city_tokens
+
     def _validate_apply_answer(self, field_key: str, raw_answer: str) -> Tuple[bool, str, str]:
         """Validate one Q&A answer. Returns (is_valid, error_message, normalized_answer)."""
         answer = raw_answer.strip().strip('"').strip("'")
@@ -5977,6 +6242,13 @@ class TelegramJobSession:
             return True, "", answer
 
         if field_key == "location":
+            normalized_label = normalize_form_label(self._apply_field_labels.get(field_key, "")).lower()
+            if "city" in normalized_label and not self._is_plausible_city_answer(answer):
+                return (
+                    False,
+                    "⚠️ Location (city) looks incomplete. Please provide the full city value as it appears in the dropdown (for example: Tel Aviv, Jerusalem, or Haifa).",
+                    "",
+                )
             if len(answer) < 2:
                 return False, "⚠️ Location looks too short. Please send City, Country.", ""
             return True, "", answer
@@ -6395,6 +6667,9 @@ class TelegramJobSession:
                 self._apply_answers[field_key] = saved_value
 
         invalid_prefilled_labels = self._prune_invalid_prefilled_option_answers()
+        invalid_prefilled_labels.extend(self._prune_invalid_prefilled_answers())
+        if invalid_prefilled_labels:
+            invalid_prefilled_labels = list(dict.fromkeys(invalid_prefilled_labels))
         self._apply_asked_field_keys = []
         self._apply_question_idx = self._first_missing_apply_field_idx()
         self._apply_in_progress_job_id = self._current_job.get("id")
@@ -6415,7 +6690,7 @@ class TelegramJobSession:
             if len(invalid_prefilled_labels) > 10:
                 extra = f"\n  • ... and {len(invalid_prefilled_labels) - 10} more"
             self._send(
-                "⚠️ Some saved selection answers are no longer valid for the current option lists.\n"
+                "⚠️ Some saved answers are no longer valid for the current form validation/option lists.\n"
                 "I removed them and will ask you again:\n"
                 f"{label_lines}{extra}"
             )
@@ -6600,7 +6875,7 @@ class TelegramJobSession:
 
         while self._apply_question_idx < len(self._apply_form_fields):
             next_key, _next_prompt = self._apply_form_fields[self._apply_question_idx]
-            if self._apply_answers.get(next_key):
+            if self._has_apply_answer(next_key):
                 self._apply_question_idx += 1
                 continue
             break
@@ -6661,18 +6936,22 @@ class TelegramJobSession:
         rescanned_fields = self._build_apply_form_fields(rescanned, include_fixed_fields=False)
         rescanned_prompts = {k: p for k, p in rescanned_fields}
         rescanned_labels = dict(self._apply_field_labels)
+        rescanned_key_set = {field_key for field_key, _prompt in rescanned_fields}
 
         merged_fields: List[Tuple[str, str]] = []
         merged_labels: Dict[str, str] = {}
 
-        # Keep already discovered keys in-place while refreshing prompt/label text from live rescan when available.
+        # Keep discovered keys that still exist in live scan or were already answered.
+        # Drop unanswered stale keys that disappeared from the current live form.
         for old_key, old_prompt in old_fields:
+            if old_key not in rescanned_key_set and not self._has_apply_answer(old_key, old_answers):
+                continue
             merged_fields.append((old_key, rescanned_prompts.get(old_key, old_prompt)))
             merged_labels[old_key] = rescanned_labels.get(old_key, old_labels.get(old_key, ""))
 
         # Append only genuinely new scraped keys in the order they appear in the rescan.
         for scanned_key, scanned_prompt in rescanned_fields:
-            if scanned_key in existing_set:
+            if any(existing_key == scanned_key for existing_key, _prompt in merged_fields):
                 continue
             merged_fields.append((scanned_key, scanned_prompt))
             merged_labels[scanned_key] = rescanned_labels.get(scanned_key, "")
@@ -6692,7 +6971,7 @@ class TelegramJobSession:
 
         has_prompt_refresh = bool(changed_prompt_or_label_keys)
         has_unanswered_prompt_refresh = any(
-            not old_answers.get(key)
+            not self._has_apply_answer(key, old_answers)
             for key in changed_prompt_or_label_keys
         )
         if not new_keys and not has_prompt_refresh:
@@ -6704,7 +6983,7 @@ class TelegramJobSession:
         # Transfer answers strictly by field key; no semantic collapsing across labels.
         new_answers: Dict[str, str] = {}
         for field_key, _prompt in self._apply_form_fields:
-            if old_answers.get(field_key):
+            if self._has_apply_answer(field_key, old_answers):
                 new_answers[field_key] = old_answers[field_key]
                 continue
             # Pre-fill from saved profile for fields discovered via rescan.
@@ -6948,6 +7227,12 @@ class TelegramJobSession:
         else:
             submission_section += "• <i>No values are currently available for submission.</i>"
 
+        cv_context_value = (self._apply_answers.get("cv_path") or self._saved_profile.get("cv_path") or "").strip()
+        cv_context_note = (
+            "\n\n📎 <b>CV candidate for upload:</b> "
+            + html.escape(cv_context_value or "(not set)")
+        )
+
         verification_note = ""
         if self._apply_scan_unverified:
             verification_note = (
@@ -6974,6 +7259,7 @@ class TelegramJobSession:
             f"Role: <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>\n"
             f"🔗 {html.escape(url)}\n\n"
             + submission_section
+            + cv_context_note
             + verification_note
             + prefill_launch_note
             + "\n\n"
@@ -7235,6 +7521,69 @@ class TelegramJobSession:
                 try:
                     page = ctx.pages[0] if ctx.pages else ctx.new_page()
                     page.set_default_timeout(20000)
+
+                    def _dismiss_typeahead_overlay_if_present() -> bool:
+                        """Dismiss LinkedIn autocomplete overlays that can intercept modal button clicks."""
+                        overlay_selectors = [
+                            "[data-test-single-typeahead-entity-form-search-result='true']",
+                            ".search-typeahead-v2__hit--autocomplete",
+                        ]
+
+                        def _overlay_visible() -> bool:
+                            for sel in overlay_selectors:
+                                try:
+                                    nodes = page.locator(sel)
+                                    count = min(nodes.count(), 8)
+                                    for idx in range(count):
+                                        try:
+                                            if nodes.nth(idx).is_visible(timeout=80):
+                                                return True
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    continue
+                            return False
+
+                        if not _overlay_visible():
+                            return False
+
+                        try:
+                            page.keyboard.press("Enter")
+                            page.wait_for_timeout(120)
+                        except Exception:
+                            pass
+                        if not _overlay_visible():
+                            self.logger.info("Easy Apply: dismissed typeahead overlay via Enter")
+                            return True
+
+                        try:
+                            page.evaluate(
+                                "() => { const el = document.activeElement; if (el && typeof el.blur === 'function') { el.blur(); } }"
+                            )
+                            page.wait_for_timeout(120)
+                        except Exception:
+                            pass
+                        if not _overlay_visible():
+                            self.logger.info("Easy Apply: dismissed typeahead overlay via blur")
+                            return True
+
+                        for sel in [
+                            ".artdeco-modal__header",
+                            ".artdeco-modal__content",
+                            ".jobs-easy-apply-modal__content",
+                        ]:
+                            try:
+                                area = page.locator(sel).first
+                                if area.count() > 0 and area.is_visible(timeout=120):
+                                    area.click(timeout=500, position={"x": 8, "y": 8})
+                                    page.wait_for_timeout(120)
+                                    if not _overlay_visible():
+                                        self.logger.info("Easy Apply: dismissed typeahead overlay via modal click")
+                                        return True
+                            except Exception:
+                                continue
+
+                        return not _overlay_visible()
                     try:
                         page.bring_to_front()
                     except Exception:
@@ -7455,10 +7804,24 @@ class TelegramJobSession:
                             return True, "Application submitted (modal closed after Submit)."
 
                         elif "next" in btn_text or "review" in btn_text or "continue" in btn_text or "التالي" in btn_text or "مراجعة" in btn_text or "الاستمرار" in btn_text:
-                            next_btn.click(timeout=5000)
+                            _dismiss_typeahead_overlay_if_present()
+                            try:
+                                next_btn.click(timeout=5000)
+                            except Exception:
+                                if _dismiss_typeahead_overlay_if_present():
+                                    next_btn.click(timeout=5000)
+                                else:
+                                    raise
                         else:
                             # Unknown button — click it and hope for the best
-                            next_btn.click(timeout=5000)
+                            _dismiss_typeahead_overlay_if_present()
+                            try:
+                                next_btn.click(timeout=5000)
+                            except Exception:
+                                if _dismiss_typeahead_overlay_if_present():
+                                    next_btn.click(timeout=5000)
+                                else:
+                                    raise
 
                     if not submit_application:
                         self._last_preview_browser_snapshot = list(browser_seen.values())
