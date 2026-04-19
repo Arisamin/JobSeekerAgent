@@ -596,6 +596,55 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertIn("cover_letter_path", session._apply_answers)
         self.assertEqual(session._apply_answers.get("cover_letter_path"), "")
 
+    def test_rescan_does_not_announce_required_questions_when_new_fields_prefilled(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+        session._easy_apply_run_mode = "search"
+        session._current_job = {
+            "id": 9,
+            "title": "Role",
+            "company": "Comp",
+            "url": "https://www.linkedin.com/jobs/view/1/",
+        }
+
+        session._apply_form_fields = [
+            ("location", "location"),
+        ]
+        session._apply_field_labels = {
+            "location": "Location (city)",
+        }
+        session._apply_field_types = {
+            "location": "text",
+        }
+        session._apply_field_options = {}
+        session._apply_answers = {
+            "location": "Tel Aviv",
+        }
+        session._saved_profile = {
+            "cv_path": r"C:\MyData\Ariel CV - 2026 [2].pdf",
+            "cover_letter_path": r"C:\MyData\Ariel CV - 2026 [2].pdf",
+            "custom__linkedin_profile__4661a6e4c0": "http://linkedin.com",
+            "custom__how_did_you_hear_about_jfrog__7a1302ea68": "friend",
+            "custom__follow_jfrog_to_stay_up_to_date_with_their_p__b52e1896f4": "No",
+        }
+        session._apply_asked_field_keys = ["location"]
+        session._apply_question_idx = 1
+
+        session._scan_easy_apply_fields = lambda _url, seed_answers=None: [
+            ("location", "Location (city)", "text"),
+            ("cv_path", "Resume", "file"),
+            ("cover_letter_path", "Cover letter", "file"),
+            ("custom__linkedin_profile__4661a6e4c0", "LinkedIn Profile", "text"),
+            ("custom__how_did_you_hear_about_jfrog__7a1302ea68", "How did you hear about JFrog?", "text"),
+            ("custom__follow_jfrog_to_stay_up_to_date_with_their_p__b52e1896f4", "Follow JFrog to stay up to date with their page.", "checkbox"),
+        ]
+
+        expanded = session._maybe_expand_apply_fields_via_rescan(session._current_job["url"])
+
+        self.assertFalse(expanded)
+        self.assertNotIn("I found more required questions", "\n".join(sent_messages))
+
     def test_prune_invalid_prefilled_option_answers_removes_stale_value(self):
         session = self._make_session()
         session._persist_saved_profile = lambda: None

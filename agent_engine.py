@@ -6997,8 +6997,13 @@ class TelegramJobSession:
 
         self._apply_question_idx = self._first_missing_apply_field_idx()
 
+        new_unanswered_keys = [
+            field_key for field_key in new_keys
+            if not self._has_apply_answer(field_key, self._apply_answers)
+        ]
+
         new_labels: List[str] = []
-        for field_key in new_keys:
+        for field_key in new_unanswered_keys:
             label = self._apply_field_labels.get(field_key, "")
             if label:
                 new_labels.append(label)
@@ -7014,7 +7019,7 @@ class TelegramJobSession:
             # Prompt updates for already-answered fields do not require another user action.
             pass
 
-        return (bool(new_keys) or has_unanswered_prompt_refresh) and self._apply_question_idx < len(self._apply_form_fields)
+        return self._apply_question_idx < len(self._apply_form_fields)
 
     def _condense_label_10_words(self, label: str, max_len: int = 10) -> str:
         """Truncate label to max_len words for compact display."""
