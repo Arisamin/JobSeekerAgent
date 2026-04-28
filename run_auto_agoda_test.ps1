@@ -2,8 +2,8 @@ Param(
     [string]$JobMatch = "agoda",
     [int]$MaxJobs = 5,
     [string]$Query = "Senior C# Developer Israel",
-    [ValidateSet("search", "testing")]
-    [string]$EasyApplyRunMode = "testing",
+    [ValidateSet("search", "headed", "testing")]
+    [string]$EasyApplyRunMode = "headed",
     [switch]$PreviewBeforeSubmit,
     [switch]$MirrorToTelegram,
     [switch]$NoScrape,

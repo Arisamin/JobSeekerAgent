@@ -40,8 +40,10 @@ class AutoAgodaTestAgent:
         self.headless_scrape = headless_scrape
         self.max_jobs = max_jobs
         self.query = query
-        mode = (easy_apply_run_mode or "testing").strip().lower()
-        self.easy_apply_run_mode = mode if mode in {"search", "testing"} else "testing"
+        mode = (easy_apply_run_mode or "headed").strip().lower()
+        if mode == "testing":
+            mode = "headed"
+        self.easy_apply_run_mode = mode if mode in {"search", "headed"} else "headed"
         self.preview_before_submit = preview_before_submit
         self.mirror_to_telegram = mirror_to_telegram
         self.telegram_bot_token = (telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
@@ -380,9 +382,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--easy-apply-run-mode",
-        choices=["search", "testing"],
-        default="testing",
-        help="Easy Apply scan traversal mode for apply flow (default: testing)",
+        choices=["search", "headed", "testing"],
+        default="headed",
+        help="Easy Apply scan traversal mode for apply flow (default: headed; testing is a legacy alias)",
     )
     parser.add_argument(
         "--preview-before-submit",
@@ -399,7 +401,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Telegram bot token for mirror mode (falls back to TELEGRAM_BOT_TOKEN env var)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if getattr(args, "easy_apply_run_mode", "") == "testing":
+        args.easy_apply_run_mode = "headed"
+    return args
 
 
 def main() -> int:

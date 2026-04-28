@@ -1,136 +1,125 @@
-# Operator Commands
+# OPERATOR COMMANDS (? HELP STYLE)
 
-Copy-paste commands for day-to-day operation.
+Day-to-day runbook in command-help format.
 
-## 1) Run report mode
+## NAME
+Job Seeker Agent operator commands.
+
+## SYNOPSIS
+
+Report mode (single run):
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 .\Start_Report_Mode.bat
 ```
 
-What it does:
-- Runs one report-mode cycle.
-- Generates/updates report artifacts in `Reports`.
-- Stops after the run.
+Search/Telegram mode (launcher defaults):
 
-Expected behavior:
-- Console prints: `Starting Job Seeker Report Mode...`
-- Then: `Report Mode stopped. You can close this window.`
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\Start_Agent_Search_Mode.bat [options]
+```
 
-## 2) Run search flow mode
+Advanced direct run (bypass launcher defaults):
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\.venv\Scripts\python.exe .\agent_engine.py [options]
+```
+
+## QUICK BOTTOM LINE (HEADED APPLY DEBUG)
+
+Copy-paste this when you want to apply while seeing the browser in action:
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\.venv\Scripts\python.exe .\agent_engine.py --telegram-notify --easy-apply-run-mode headed --result-filter-mode easy_apply_do_not_apply_only --easy-apply-only --max-jobs 1
+```
+
+Why this is the right command:
+- No `--headless`, so browser is visible.
+- `--easy-apply-run-mode headed` keeps apply flow headed-friendly.
+- Uses your existing filter mode and easy-apply-only discovery intent.
+
+Important:
+- `Start_Agent_Search_Mode.bat` hardcodes `--headless`, so do not use that launcher for headed debugging.
+
+## RUN MODES TABLE
+
+| Run Mode | Command Entry Point | Purpose | Main Options | Notes |
+|---|---|---|---|---|
+| Searching | `.\Start_Agent_Search_Mode.bat [options]` | Discover new jobs, analyze, then operate via Telegram | `--max-jobs`, `--reset-db`, `--headless`, `--easy-apply-only`, `--result-filter-mode`, `--query` | Launcher always appends `--telegram-notify --max-jobs 5 --easy-apply-run-mode search --headless` before your extra options |
+| Report | `.\Start_Report_Mode.bat` | One-shot report generation/update | Usually none for launcher path | Stops after report cycle |
+| Apply-only workflow (no search) | `.\.venv\Scripts\python.exe .\agent_engine.py --telegram-notify --max-jobs 0 [options]` | Launch Telegram session and apply from existing DB jobs only | `--max-jobs 0`, `--easy-apply-run-mode`, optional `--headless` | Equivalent to searching with zero new job target |
+
+## OPTION SCOPE TABLE
+
+| Option | Affects Searching | Affects Report | Affects Apply-only (`--max-jobs 0`) | Meaning |
+|---|---|---|---|---|
+| `--max-jobs N` | Yes | Indirect | Yes | Target number of newly added jobs; `0` means no new search intake |
+| `--reset-db` | Yes | Usually no | Usually no | Clears processed jobs DB before run |
+| `--query "..."` | Yes | Sometimes | Usually no | Search keywords for LinkedIn extraction |
+| `--easy-apply-only` | Yes | Sometimes | No practical effect | Discovery filter: keep Easy Apply jobs only |
+| `--result-filter-mode all` | Yes | Yes | No practical effect | No post-analysis filtering |
+| `--result-filter-mode easy_apply_do_not_apply_only` | Yes | Yes | No practical effect | Keep only Easy Apply + `DO NOT APPLY` in run results |
+| `--result-filter-mode easy_apply_match` | Yes | Yes | No practical effect | Keep only Easy Apply + match-level recommendations |
+| `--easy-apply-run-mode search` | Yes | No practical effect | Yes | Apply-flow traversal style (incremental rescan behavior) |
+| `--easy-apply-run-mode headed` | Yes | No practical effect | Yes | Apply-flow traversal style with headed-friendly behavior |
+| `--headless` | Yes | Yes | Yes | Browser hidden when applied to direct python run |
+
+## COPY-PASTE EXAMPLES BY MODE
+
+Searching (default launcher behavior):
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 .\Start_Agent_Search_Mode.bat
 ```
 
-Force a fresh run (clear DB first inside agent startup):
-
-```powershell
-Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Search_Mode.bat --max-jobs 5 --headless --reset-db
-```
-
-What it does:
-- Starts the regular Telegram-driven flow.
-- Uses `--easy-apply-run-mode search`, `--max-jobs 5`, and `--headless` (from launcher defaults).
-- `--max-jobs` is a target count of new DB additions for this run, not a cap on scanned cards.
-
-Expected behavior:
-- Console prints: `Starting Job Seeker Agent in search mode...`
-- Telegram session should start and accept commands like `Next`, `Apply`, `Preview`, `Submit`.
-- Search mode does **not** auto-open a report page in browser.
-
-Easy Apply-only discovery mode:
-
-```powershell
-Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Search_Mode.bat --easy-apply-only
-```
-
-Result-filter modes (post-analysis run filtering):
-
-```powershell
-Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Search_Mode.bat --result-filter-mode easy_apply_do_not_apply_only
-```
-
-```powershell
-Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Search_Mode.bat --result-filter-mode easy_apply_match
-```
-
-What these new params do:
-- `--result-filter-mode all` (default): no post-analysis filtering.
-- `--result-filter-mode easy_apply_do_not_apply_only`: keeps only `Easy Apply` jobs with recommendation `DO NOT APPLY` in run results.
-- `--result-filter-mode easy_apply_match`: keeps only `Easy Apply` jobs with match-level recommendations (for example `MATCH` / `STRONG MATCH`) in run results.
-
-Important behavior:
-- Both `easy_apply_do_not_apply_only` and `easy_apply_match` force Easy Apply discovery filtering automatically (equivalent to Easy Apply-only discovery intent for that run).
-- Filtering is applied after recommendation analysis, so DB metadata is still refreshed for analyzed jobs.
-- Report search parameters now include `Result Filter Mode` so operator can verify active mode.
-
-Important note:
-- `--easy-apply-run-mode search` controls apply-flow scanning behavior only.
-- It does not filter discovered jobs to Easy Apply.
-- Use `--easy-apply-only` for discovery filtering.
-- Extraction now keeps scanning result cards until target is reached or result feed is exhausted.
-
-Expected behavior in Easy Apply-only mode:
-- LinkedIn search URL includes `f_AL=true` (Easy Apply filter) before scanning cards.
-- If per-job probe is inconclusive (`Unknown`), the run trusts the filtered search feed and treats the card as Easy Apply.
-- Jobs without confirmed Easy Apply are filtered out during discovery.
-- Only jobs classified as `Easy Apply` are added as newly discovered jobs.
-
-If your browser keeps showing an old report (for example `Generated: 2026-04-08 ...`):
-- You are likely viewing a previously opened local HTML tab, not the live latest-report server.
-- Run report mode, then use the server URL it prints (for example `http://127.0.0.1:8765/`).
-- Avoid opening report files directly from disk when you want the latest auto-selected report.
-
-Optional examples:
-
-```powershell
-Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Search_Mode.bat --max-jobs 8
-```
-
-```powershell
-Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\Start_Agent_Search_Mode.bat --query "Senior C# Developer Israel"
-```
+Searching with explicit filters:
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 .\Start_Agent_Search_Mode.bat --easy-apply-only --result-filter-mode easy_apply_match --max-jobs 5 --headless
 ```
 
-## 3) Clear jobs DB
+Report mode:
 
-Safe reset command (removes DB and SQLite sidecar files):
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\Start_Report_Mode.bat
+```
+
+Apply-only workflow (no new search, headed apply behavior):
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\.venv\Scripts\python.exe .\agent_engine.py --telegram-notify --max-jobs 0 --easy-apply-run-mode headed
+```
+
+## DB RESET
+
+Safe reset (remove DB + sidecars):
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 Remove-Item .\processed_jobs.db, .\processed_jobs.db-wal, .\processed_jobs.db-shm -ErrorAction SilentlyContinue
 ```
 
-Verification (recommended):
+Verify reset:
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 Test-Path .\processed_jobs.db, .\processed_jobs.db-wal, .\processed_jobs.db-shm
 ```
 
-Expected verification output:
+Expected output:
 - `False False False`
 
-Optional backup before clear:
+Optional backup before reset:
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 Copy-Item .\processed_jobs.db (".\processed_jobs.backup_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".db") -ErrorAction SilentlyContinue
 ```
-
-Expected behavior after clearing:
-- On next run, a fresh DB is created automatically.
-- All prior job statuses/history in `processed_jobs.db` are reset.

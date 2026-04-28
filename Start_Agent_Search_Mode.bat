@@ -23,8 +23,8 @@ REM      .\Start_Agent_Search_Mode.bat --max-jobs 5 --headless --reset-db
 REM   2c) Easy Apply only discovery mode:
 REM      .\Start_Agent_Search_Mode.bat --easy-apply-only
 REM
-REM   3) Testing traversal mode:
-REM      .\Start_Agent_Search_Mode.bat --easy-apply-run-mode testing
+REM   3) Headed traversal mode:
+REM      .\Start_Agent_Search_Mode.bat --easy-apply-run-mode headed
 REM
 REM   4) Override query:
 REM      .\Start_Agent_Search_Mode.bat --query "Senior C# Developer Israel"

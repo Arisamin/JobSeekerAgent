@@ -17,15 +17,20 @@ class TestEasyApplyModeParsing(unittest.TestCase):
             args = agent_engine.parse_args()
         self.assertEqual(args.easy_apply_run_mode, "search")
 
-    def test_agent_engine_parse_args_accepts_testing(self):
+    def test_agent_engine_parse_args_accepts_headed(self):
+        with patch.object(sys, "argv", ["agent_engine.py", "--easy-apply-run-mode", "headed"]):
+            args = agent_engine.parse_args()
+        self.assertEqual(args.easy_apply_run_mode, "headed")
+
+    def test_agent_engine_parse_args_maps_legacy_testing_alias_to_headed(self):
         with patch.object(sys, "argv", ["agent_engine.py", "--easy-apply-run-mode", "testing"]):
             args = agent_engine.parse_args()
-        self.assertEqual(args.easy_apply_run_mode, "testing")
+        self.assertEqual(args.easy_apply_run_mode, "headed")
 
-    def test_auto_agoda_parse_args_defaults_to_testing(self):
+    def test_auto_agoda_parse_args_defaults_to_headed(self):
         with patch.object(sys, "argv", ["auto_agoda_test_agent.py"]):
             args = agoda_runner.parse_args()
-        self.assertEqual(args.easy_apply_run_mode, "testing")
+        self.assertEqual(args.easy_apply_run_mode, "headed")
 
     def test_auto_agoda_parse_args_accepts_search(self):
         with patch.object(sys, "argv", ["auto_agoda_test_agent.py", "--easy-apply-run-mode", "search"]):
@@ -56,9 +61,13 @@ class TestTelegramSessionEasyApplyMode(unittest.TestCase):
             easy_apply_run_mode=easy_apply_run_mode,
         )
 
-    def test_session_mode_accepts_testing(self):
+    def test_session_mode_accepts_headed(self):
+        session = self._make_session("headed")
+        self.assertEqual(session._easy_apply_run_mode, "headed")
+
+    def test_session_mode_maps_legacy_testing_alias_to_headed(self):
         session = self._make_session("testing")
-        self.assertEqual(session._easy_apply_run_mode, "testing")
+        self.assertEqual(session._easy_apply_run_mode, "headed")
 
     def test_session_mode_fallbacks_to_search_for_invalid(self):
         session = self._make_session("invalid-mode")

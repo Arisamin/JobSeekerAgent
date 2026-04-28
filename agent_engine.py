@@ -2821,7 +2821,9 @@ class TelegramJobSession:
         if self._normalize_saved_profile_aliases():
             self._persist_saved_profile()
         mode = (easy_apply_run_mode or "search").strip().lower()
-        self._easy_apply_run_mode = mode if mode in {"search", "testing"} else "search"
+        if mode == "testing":
+            mode = "headed"
+        self._easy_apply_run_mode = mode if mode in {"search", "headed"} else "search"
 
     @staticmethod
     def _classify_apply_flow_transition(
@@ -3374,7 +3376,7 @@ class TelegramJobSession:
         primary_profile = _os.path.join(local_app_data, "Google", "Chrome", "User Data") if local_app_data else ""
         fallback_profile = str(Path(__file__).parent / ".playwright_profile")
 
-        testing_mode = self._easy_apply_run_mode == "testing"
+        testing_mode = self._easy_apply_run_mode == "headed"
         # Keep scan headless by default so users do not see scan-window flicker/close.
         # Set AGENT_SHOW_SCAN_UI=1 only when debugging scanner internals.
         easy_apply_headless = _os.environ.get("AGENT_SHOW_SCAN_UI", "0") != "1"
@@ -9029,11 +9031,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--easy-apply-run-mode",
         type=str,
-        choices=["search", "testing"],
+        choices=["search", "headed", "testing"],
         default="search",
-        help="Easy Apply scan traversal mode: search or testing",
+        help="Easy Apply scan traversal mode: search or headed (testing is a legacy alias)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if getattr(args, "easy_apply_run_mode", "") == "testing":
+        args.easy_apply_run_mode = "headed"
+    return args
 
 
 def reset_processed_jobs_db(base_dir: Path) -> None:

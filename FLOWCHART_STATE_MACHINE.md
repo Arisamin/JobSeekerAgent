@@ -7,7 +7,7 @@ flowchart TD
 	B -- yes --> C[Initialize APPLYING state and fixed fields]
 
 	C --> D{Run mode}
-	D -- testing --> E[Pre-scan required fields]
+	D -- headed --> E[Pre-scan required fields]
 	D -- normal --> F[Incremental Q&A starts]
 
 	E --> G[Build dynamic form fields]

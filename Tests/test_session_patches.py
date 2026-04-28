@@ -267,13 +267,13 @@ class TestStagnantSignatureThreshold(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. Discovery-mode split: only testing mode uses aggressive prefill
+# 3. Discovery-mode split: only headed mode uses aggressive prefill
 # ---------------------------------------------------------------------------
 
 class TestDiscoveryModeSplit(unittest.TestCase):
     """
     After the incremental-flow patch, a session created with easy_apply_run_mode='search'
-    must evaluate  ``testing_mode = self._easy_apply_run_mode == "testing"``
+    must evaluate  ``testing_mode = self._easy_apply_run_mode == "headed"``
     as False, so search mode no longer performs aggressive auto-prefill scanning.
 
     We cannot call _scan_easy_apply_fields directly (it needs a browser), but we CAN:
@@ -285,15 +285,24 @@ class TestDiscoveryModeSplit(unittest.TestCase):
         session = _make_session("search")
         try:
             # This is the exact expression from _scan_easy_apply_fields
-            testing_mode = session._easy_apply_run_mode == "testing"
+            testing_mode = session._easy_apply_run_mode == "headed"
             self.assertFalse(testing_mode, "search mode should be incremental (testing_mode=False)")
         finally:
             _cleanup(session)
 
-    def test_testing_mode_evaluates_as_testing_mode_true(self):
+    def test_headed_mode_evaluates_as_testing_mode_true(self):
+        session = _make_session("headed")
+        try:
+            testing_mode = session._easy_apply_run_mode == "headed"
+            self.assertTrue(testing_mode)
+        finally:
+            _cleanup(session)
+
+    def test_legacy_testing_alias_maps_to_headed(self):
         session = _make_session("testing")
         try:
-            testing_mode = session._easy_apply_run_mode == "testing"
+            self.assertEqual(session._easy_apply_run_mode, "headed")
+            testing_mode = session._easy_apply_run_mode == "headed"
             self.assertTrue(testing_mode)
         finally:
             _cleanup(session)
@@ -303,22 +312,22 @@ class TestDiscoveryModeSplit(unittest.TestCase):
         session = _make_session("foobar")
         try:
             self.assertEqual(session._easy_apply_run_mode, "search")
-            testing_mode = session._easy_apply_run_mode == "testing"
+            testing_mode = session._easy_apply_run_mode == "headed"
             self.assertFalse(testing_mode)
         finally:
             _cleanup(session)
 
     def test_old_unified_expression_would_have_been_true_for_search(self):
         """
-        Regression guard: the OLD unified expression treated search as testing,
+        Regression guard: the OLD unified expression treated search as headed,
         which we no longer want for incremental flow.
         """
         session = _make_session("search")
         try:
-            old_expression_result = session._easy_apply_run_mode in {"testing", "search"}
+            old_expression_result = session._easy_apply_run_mode in {"headed", "search"}
             self.assertTrue(
                 old_expression_result,
-                "Confirms the old unified logic treated search mode as testing"
+                "Confirms the old unified logic treated search mode as headed"
             )
         finally:
             _cleanup(session)
