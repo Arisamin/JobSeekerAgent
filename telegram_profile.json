@@ -5,7 +5,6 @@
       "full_name": "Ariel Samin",
       "email": "ariel.samin@gmail.com",
       "phone": "+972547535758",
-      "location": "Aviv",
       "linkedin": "https://il.linkedin.com/in/ariel-samin-58a57b22",
       "custom__do_you_have_experience_as_system__lead_devel__6c45c60e9a": "No",
       "custom__confidential__f50f5bcb73": "No",
@@ -19,8 +18,22 @@
       "custom__follow_innodata_inc__to_stay_up_to_date_with__21bd5a65e8": "No",
       "custom__last_name__2b06184783__dup2": "Samin",
       "custom__follow_cynet_security_to_stay_up_to_date_wit__5b53eecc20": "No",
-      "cover_letter_path": "",
-      "custom__phone_country_code__42a596e1fa": "Israel (+972)"
+      "cover_letter_path": "C:\\MyData\\Ariel CV - 2026 [2].pdf",
+      "custom__follow_legit_security_to_stay_up_to_date_wit__6562d4b400": "No",
+      "phone_country_code": "Israel (+972)",
+      "custom__your_title__2c2b886d2c": "Software Engineer",
+      "custom__company__71b21161ff": "Varonis",
+      "custom__description__cb329146a0": "Developing server side distributed systems",
+      "custom__month_of_from__35dc6b003c": "May",
+      "custom__tell_us_something_interesting_about_yourself__7b1d9c1668": "I am submitting this application from an automation process I've created with AI",
+      "custom__are_you_able_to_work_in_a_hybrid_schedule_ba__c3a6b648cb": "Yes",
+      "custom__are_you_able_to_work_in_a_hybrid_schedule_ba__c7ebe06968": "Yes",
+      "custom__follow_eko_to_stay_up_to_date_with_their_pag__87ab08da47": "No",
+      "custom__linkedin_profile__4661a6e4c0": "http://linkedin.com",
+      "custom__how_did_you_hear_about_jfrog__7a1302ea68": "friend",
+      "custom__follow_jfrog_to_stay_up_to_date_with_their_p__b52e1896f4": "No",
+      "location": "Tel Aviv-Yafo, Tel Aviv District, Israel",
+      "custom__follow_papaya_to_stay_up_to_date_with_their__5907371645": "No"
     }
   }
 }
