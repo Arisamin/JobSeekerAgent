@@ -10,6 +10,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -3549,9 +3550,20 @@ class TelegramJobSession:
                 raw = re.sub(r"[_\-/.]+", " ", raw)
                 raw = normalize_form_label(raw)
                 lowered = raw.lower()
+
+                # Normalize common date-range attribute labels to human-readable order.
+                match = re.fullmatch(r"(month|year)\s+of\s+(from|to)", lowered)
+                if match:
+                    part = match.group(1).lower()
+                    edge = match.group(2).capitalize()
+                    raw = f"{edge} {part}"
+                    lowered = raw.lower()
+
                 if len(raw) < 3:
                     return ""
                 if lowered in {"input", "field", "question", "answer", "text", "value", "name", "id"}:
+                    return ""
+                if lowered in {"required", "from required", "to required"}:
                     return ""
                 if re.fullmatch(r"[a-z]*\d+[a-z0-9\s]*", lowered):
                     return ""
@@ -3938,6 +3950,91 @@ class TelegramJobSession:
         def _scan_step(page: Any, scope: Optional[Any] = None) -> None:
             root = scope if scope is not None else page
 
+            def _extract_existing_document_template_options(kind: str) -> List[str]:
+                options: List[str] = []
+                selectors = ", ".join(
+                    [
+                        ".jobs-document-card__filename",
+                        ".ui-attachment__filename",
+                        "[class*='document'][class*='filename']",
+                        "[class*='attachment__filename']",
+                    ]
+                )
+                for node in root.locator(selectors).all():
+                    try:
+                        # Keep non-visible nodes too: LinkedIn often keeps alternate
+                        # resume options mounted but visually collapsed.
+                        filename_text = normalize_form_label(node.inner_text(timeout=250) or "")
+                        if not filename_text:
+                            filename_text = normalize_form_label(node.text_content(timeout=250) or "")
+                        if not filename_text:
+                            continue
+
+                        lowered_filename = filename_text.lower().strip()
+                        if lowered_filename in {
+                            "resume",
+                            "cv",
+                            "cover letter",
+                            "upload resume",
+                            "upload cv",
+                            "view",
+                            "edit",
+                            "replace",
+                            "remove",
+                        }:
+                            continue
+                        if is_generic_choice_label(filename_text) or is_section_heading_label(filename_text):
+                            continue
+
+                        context_text = ""
+                        try:
+                            context_text = (
+                                node.locator("xpath=ancestor::*[self::li or self::div][1]").inner_text(timeout=250) or ""
+                            ).lower()
+                        except Exception:
+                            context_text = ""
+
+                        is_cover = "cover" in context_text
+                        if kind == "resume" and is_cover:
+                            continue
+                        if kind == "cover" and not is_cover:
+                            continue
+
+                        lowered = filename_text.lower()
+                        if any(existing.lower() == lowered for existing in options):
+                            continue
+                        options.append(filename_text)
+                    except Exception:
+                        continue
+
+                return options
+
+            existing_resume_template_options = _extract_existing_document_template_options("resume")
+            existing_cover_template_options = _extract_existing_document_template_options("cover")
+
+            def _is_placeholder_option_text(option_text: str, field_label: str) -> bool:
+                lowered = normalize_form_label(option_text or "").lower().rstrip(":")
+                if not lowered:
+                    return True
+                if lowered in {
+                    "select",
+                    "select...",
+                    "select…",
+                    "choose",
+                    "choose...",
+                    "choose…",
+                    "month",
+                    "year",
+                    "day",
+                    "from",
+                    "to",
+                }:
+                    return True
+                normalized_label = normalize_form_label(field_label or "").lower().rstrip(":")
+                if normalized_label and lowered == normalized_label:
+                    return True
+                return False
+
             def _add_from_card_template_payload(template_payload: Dict[str, Any]) -> int:
                 if not isinstance(template_payload, dict):
                     return 0
@@ -4053,9 +4150,20 @@ class TelegramJobSession:
                     if include_hidden_file:
                         self.logger.info(f"Scan: including hidden file input for label '{label or fi_name or fi_id}'")
                     if is_cover_slot:
-                        _add("cover_letter_path", label or "Cover letter", "file")
+                        _add(
+                            "cover_letter_path",
+                            label or "Cover letter",
+                            "file",
+                            options=existing_cover_template_options,
+                        )
                     else:
-                        _add("cv_path", label or "Resume / CV", "file")
+                        resume_type = "select" if existing_resume_template_options else "file"
+                        _add(
+                            "cv_path",
+                            label or "Resume / CV",
+                            resume_type,
+                            options=existing_resume_template_options,
+                        )
                 except Exception:
                     pass
 
@@ -4218,7 +4326,7 @@ class TelegramJobSession:
                         # Capture initial options
                         for opt in sel_el.locator("option").all():
                             txt = normalize_form_label(opt.inner_text(timeout=200))
-                            if txt:
+                            if txt and not _is_placeholder_option_text(txt, label):
                                 options.append(txt)
                         # Scroll select element to ensure all options are rendered (for long lists)
                         if len(options) > 10:
@@ -4229,7 +4337,7 @@ class TelegramJobSession:
                                 # Re-capture all options after scroll
                                 for opt in sel_el.locator("option").all():
                                     txt = normalize_form_label(opt.inner_text(timeout=200))
-                                    if txt and txt not in options:
+                                    if txt and not _is_placeholder_option_text(txt, label) and txt not in options:
                                         options.append(txt)
                             except Exception:
                                 pass  # scrolling failed, but we have initial options
@@ -4279,6 +4387,8 @@ class TelegramJobSession:
                                 if not txt:
                                     txt = normalize_form_label(opt.get_attribute("aria-label", timeout=120) or "")
                                 if not txt:
+                                    continue
+                                if _is_placeholder_option_text(txt, label):
                                     continue
                                 lowered = txt.lower()
                                 if lowered in {"select", "choose", "select...", "choose...", "choose…", "select…"}:
@@ -5785,6 +5895,57 @@ class TelegramJobSession:
         option_field_types = {"radio", "checkbox", "select", "action"}
         options_by_canonical_label: Dict[str, List[str]] = {}
 
+        def _local_cv_file_options() -> List[str]:
+            """Best-effort local CV choices when LinkedIn doesn't surface template options."""
+            candidates: List[str] = []
+            seen: set[str] = set()
+
+            def _add_candidate(path_text: str) -> None:
+                raw = (path_text or "").strip()
+                if not raw:
+                    return
+                p = Path(raw)
+                if not p.exists() or not p.is_file():
+                    return
+                suffix = p.suffix.lower()
+                if suffix not in {".pdf", ".doc", ".docx", ".rtf", ".txt"}:
+                    return
+                key = str(p.resolve()).lower()
+                if key in seen:
+                    return
+                seen.add(key)
+                candidates.append(str(p.resolve()))
+
+            # Seed from known profile cache values.
+            _add_candidate(self._saved_profile.get("cv_path", ""))
+
+            # If we know one CV path, scan that folder for likely resume variants.
+            seed_path = (self._saved_profile.get("cv_path") or "").strip()
+            if seed_path:
+                try:
+                    seed_file = Path(seed_path)
+                    if seed_file.exists() and seed_file.is_file() and seed_file.parent.exists():
+                        ranked: List[Tuple[float, str]] = []
+                        for cand in seed_file.parent.iterdir():
+                            try:
+                                if not cand.is_file():
+                                    continue
+                                suffix = cand.suffix.lower()
+                                if suffix not in {".pdf", ".doc", ".docx", ".rtf", ".txt"}:
+                                    continue
+                                stem_lower = cand.stem.lower()
+                                if "cv" not in stem_lower and "resume" not in stem_lower:
+                                    continue
+                                ranked.append((cand.stat().st_mtime, str(cand.resolve())))
+                            except Exception:
+                                continue
+                        for _mtime, path_text in sorted(ranked, key=lambda item: item[0], reverse=True)[:20]:
+                            _add_candidate(path_text)
+                except Exception:
+                    pass
+
+            return candidates
+
         for scan_key, scan_label, scan_ftype in scanned:
             if (scan_ftype or "").strip().lower() not in option_field_types:
                 continue
@@ -5838,33 +5999,44 @@ class TelegramJobSession:
                     options = list(fallback_options)
                     self._apply_field_options[key] = options
 
+            if key == "cv_path" and not options:
+                fallback_cv_options = _local_cv_file_options()
+                if len(fallback_cv_options) >= 2:
+                    options = fallback_cv_options
+                    self._apply_field_options[key] = options
+                    normalized_ftype = "select"
+                    self.logger.info(
+                        "Apply fields: using %d local CV file option(s) for cv_path selection fallback",
+                        len(options),
+                    )
+
             if options and normalized_ftype in option_field_types and canonical_label_key:
                 canonical_bucket = options_by_canonical_label.setdefault(canonical_label_key, [])
                 for opt in options:
                     if not any(existing.lower() == (opt or "").lower() for existing in canonical_bucket):
                         canonical_bucket.append(opt)
 
-            self._apply_field_types[key] = ftype
+            self._apply_field_types[key] = normalized_ftype
             self._apply_field_labels[key] = clean_label
             # Build a prompt from the label and field type
-            if not options and ftype in {"radio", "checkbox"} and key in {
+            if not options and normalized_ftype in {"radio", "checkbox"} and key in {
                 "relocate_bangkok",
                 "agoda_relationship",
                 "agoda_booking_holdings_group_employment",
             }:
                 options = ["Yes", "No"]
                 self._apply_field_options[key] = options
-            if not options and ftype in {"radio", "checkbox"} and _looks_binary_question(clean_label):
+            if not options and normalized_ftype in {"radio", "checkbox"} and _looks_binary_question(clean_label):
                 options = ["Yes", "No"]
                 self._apply_field_options[key] = options
-            if not options and ftype == "checkbox":
+            if not options and normalized_ftype == "checkbox":
                 options = ["Yes", "No"]
                 self._apply_field_options[key] = options
-            if not options and ftype == "action":
+            if not options and normalized_ftype == "action":
                 options = ["Share", "Skip"]
                 self._apply_field_options[key] = options
             options_block = ""
-            if options and ftype in {"radio", "checkbox", "select", "action"}:
+            if options and normalized_ftype in {"radio", "checkbox", "select", "action"}:
                 max_options_to_show = 20
                 shown_options = options[:max_options_to_show]
                 options_lines = [f"   {index + 1}) {html.escape(opt)}" for index, opt in enumerate(shown_options)]
@@ -5875,18 +6047,18 @@ class TelegramJobSession:
                 options_block += "\nReply with an option number, the full option text, or a filter substring to narrow the list."
             arabic_note = "\n🌐 Arabic label detected; English answer is fine." if _contains_arabic(label) else ""
             display_label = clean_label
-            format_hint = self._expected_format_hint(field_key=key, label=clean_label, ftype=ftype)
+            format_hint = self._expected_format_hint(field_key=key, label=clean_label, ftype=normalized_ftype)
             format_note = f"\nExpected format: {html.escape(format_hint)}" if format_hint else ""
-            if ftype in {"radio", "checkbox"}:
+            if normalized_ftype in {"radio", "checkbox"}:
                 prompt = f"❓ {display_label} (type your answer):{options_block}{arabic_note}"
-            elif ftype == "select":
+            elif normalized_ftype == "select":
                 prompt = f"🔽 {display_label} (type your choice):{options_block}{arabic_note}"
-            elif ftype == "file":
+            elif normalized_ftype == "file":
                 if key == "cover_letter_path":
                     prompt = "📝 Cover letter file path (full path, or reply 'none' if not available):"
                 else:
                     prompt = f"📎 {display_label} file path (full path):"
-            elif ftype == "action":
+            elif normalized_ftype == "action":
                 prompt = f"🔘 {display_label} (type your choice):{options_block}{arabic_note}"
             else:
                 prompt = f"✏️ {display_label}:{format_note}{arabic_note}"
@@ -5918,6 +6090,8 @@ class TelegramJobSession:
             return "Free text, e.g. Immediate / 2 weeks / 1 month"
         if normalized_type == "textarea" or key == "motivation":
             return "Short free-text response"
+        if key == "cv_path" and normalized_type == "select":
+            return "Choose one of the listed existing LinkedIn resume options by number"
         if normalized_type == "file" or key in {"cv_path", "cover_letter_path"}:
             return "Absolute existing file path"
         return ""
@@ -5931,7 +6105,11 @@ class TelegramJobSession:
         if "phone country code" in normalized_label:
             return "select"
 
-        if key in {"cv_path", "cover_letter_path"}:
+        if key == "cv_path":
+            if normalized_type == "select":
+                return "select"
+            return "file"
+        if key == "cover_letter_path":
             return "file"
         if key == "email":
             return "email"
@@ -5941,6 +6119,8 @@ class TelegramJobSession:
         if normalized_label.startswith("follow ") and "stay up to date" in normalized_label:
             return "checkbox"
         if "resume" in normalized_label or "cv" in normalized_label or "cover letter" in normalized_label:
+            if normalized_type == "select":
+                return "select"
             return "file"
 
         if "email" in normalized_label and normalized_type in {"text", "unknown", "select"}:
@@ -5961,6 +6141,15 @@ class TelegramJobSession:
             if not self._has_apply_answer(field_key):
                 return index
         return len(self._apply_form_fields)
+
+    def _should_force_cv_choice_each_run(self) -> bool:
+        """Always re-ask cv_path when multiple existing resume choices are present."""
+        cv_type = (self._apply_field_types.get("cv_path") or "").strip().lower()
+        if cv_type != "select":
+            return False
+        cv_options = [normalize_form_label(opt or "") for opt in (self._apply_field_options.get("cv_path") or [])]
+        cv_options = [opt for opt in cv_options if opt]
+        return len(cv_options) > 1
 
     def _has_apply_answer(self, field_key: str, answers: Optional[Dict[str, str]] = None) -> bool:
         """Return True when a field was explicitly answered, including intentional blank values."""
@@ -6094,6 +6283,27 @@ class TelegramJobSession:
         if answer.isdigit():
             num = int(answer)
             idx = num - 1
+
+            is_filtered_state = len(candidate_indices) != len(options)
+            if is_filtered_state:
+                if 0 <= idx < len(candidate_indices):
+                    selected = options[candidate_indices[idx]]
+                    self._option_resolution_state = None
+                    return True, selected
+
+                # Backward compatibility: also accept legacy global numbering
+                # when the supplied number points to one of the filtered results.
+                if 0 <= idx < len(options) and idx in set(candidate_indices):
+                    selected = options[idx]
+                    self._option_resolution_state = None
+                    return True, selected
+
+                self._send(
+                    f"⚠️ Invalid option number. Choose 1-{len(candidate_indices)} from the filtered list, "
+                    "or send another substring to refine it."
+                )
+                return False, ""
+
             if 0 <= idx < len(options):
                 selected = options[idx]
                 self._option_resolution_state = None
@@ -6116,7 +6326,7 @@ class TelegramJobSession:
 
         max_show = 20
         visible_matches = matches[:max_show]
-        lines = [f"{idx + 1}) {html.escape(options[idx])}" for idx in visible_matches]
+        lines = [f"{pos}) {html.escape(options[idx])}" for pos, idx in enumerate(visible_matches, start=1)]
         tail = ""
         if len(matches) > max_show:
             tail = f"\n... and {len(matches) - max_show} more match(es). Send a narrower substring if needed."
@@ -6213,6 +6423,11 @@ class TelegramJobSession:
             return True, "", normalized_answer
 
         if field_key == "cv_path":
+            if options and ftype == "select":
+                matched = self._match_option_exact(answer, options)
+                if matched:
+                    return True, "", matched
+                return False, "⚠️ Resume selection not recognized. Choose by option number or exact listed option.", ""
             candidate = Path(answer)
             if not candidate.exists() or not candidate.is_file():
                 return False, "⚠️ CV file path not found. Please send a valid existing file path.", ""
@@ -6668,6 +6883,10 @@ class TelegramJobSession:
             if saved_value:
                 self._apply_answers[field_key] = saved_value
 
+        if self._should_force_cv_choice_each_run() and self._has_apply_answer("cv_path"):
+            self._apply_answers.pop("cv_path", None)
+            self.logger.info("Apply: forcing per-run CV choice because multiple LinkedIn resume options are available")
+
         invalid_prefilled_labels = self._prune_invalid_prefilled_option_answers()
         invalid_prefilled_labels.extend(self._prune_invalid_prefilled_answers())
         if invalid_prefilled_labels:
@@ -6685,6 +6904,11 @@ class TelegramJobSession:
             self._send(
                 f"💾 Loaded <b>{loaded_count}</b> saved profile field(s), so I'll ask only missing details.\n"
                 "Reply <b>reset profile</b> anytime (outside apply flow) to clear saved values."
+            )
+        if self._should_force_cv_choice_each_run():
+            self._send(
+                "📎 Multiple existing resume choices were detected in LinkedIn for this application. "
+                "I will ask you to choose the CV for this run."
             )
         if invalid_prefilled_labels:
             label_lines = "\n".join(f"  • {html.escape(lbl)}" for lbl in invalid_prefilled_labels[:10])
@@ -6989,6 +7213,8 @@ class TelegramJobSession:
                 new_answers[field_key] = old_answers[field_key]
                 continue
             # Pre-fill from saved profile for fields discovered via rescan.
+            if field_key == "cv_path" and self._should_force_cv_choice_each_run():
+                continue
             saved_value = (self._saved_profile.get(field_key) or "").strip()
             if saved_value:
                 new_answers[field_key] = saved_value
@@ -7040,6 +7266,15 @@ class TelegramJobSession:
         text = re.sub(r"^q\d+\s*:\s*", "", text, flags=re.IGNORECASE)
         # Remove Arabic required marker that may appear in mixed-language labels.
         text = re.sub(r"\s*مطلوب\s*$", "", text, flags=re.IGNORECASE)
+
+        # Normalize machine-style date range labels into readable prompts.
+        text = re.sub(
+            r"\b(month|year)\s+of\s+(from|to)\b",
+            lambda m: f"{m.group(2).capitalize()} {m.group(1).lower()}",
+            text,
+            flags=re.IGNORECASE,
+        )
+
         text = normalize_form_label(text)
 
         # Some DOM variants duplicate the same long sentence twice.
@@ -8213,6 +8448,72 @@ class TelegramJobSession:
         try:
             cover_letter_path = (answers.get("cover_letter_path") or "").strip()
 
+            def _collect_existing_document_cards(kind: str) -> List[Tuple[str, Any]]:
+                cards: List[Tuple[str, Any]] = []
+                for node in page.locator(".jobs-document-card__filename, .ui-attachment__filename").all():
+                    try:
+                        if not node.is_visible(timeout=200):
+                            continue
+                        filename_text = normalize_form_label(node.inner_text(timeout=250) or "")
+                        if not filename_text:
+                            continue
+                        context_text = ""
+                        try:
+                            context_text = (
+                                node.locator("xpath=ancestor::*[self::li or self::div][1]").inner_text(timeout=250) or ""
+                            ).lower()
+                        except Exception:
+                            context_text = ""
+                        is_cover = "cover" in context_text
+                        if kind == "resume" and is_cover:
+                            continue
+                        if kind == "cover" and not is_cover:
+                            continue
+                        cards.append((filename_text, node))
+                    except Exception:
+                        continue
+                return cards
+
+            def _select_existing_document(kind: str, desired_name: str) -> bool:
+                target = normalize_form_label(desired_name or "").lower()
+                if not target:
+                    return False
+                for filename_text, node in _collect_existing_document_cards(kind):
+                    candidate_name = normalize_form_label(filename_text).lower()
+                    if not candidate_name:
+                        continue
+                    if target != candidate_name and target not in candidate_name and candidate_name not in target:
+                        continue
+                    for click_target in [
+                        node,
+                        node.locator("xpath=ancestor::label[1]").first,
+                        node.locator("xpath=ancestor::*[@role='radio' or self::button][1]").first,
+                        node.locator("xpath=ancestor::li[1]").first,
+                    ]:
+                        try:
+                            if click_target.count() == 0:
+                                continue
+                            if not click_target.is_visible(timeout=150):
+                                continue
+                            click_target.click(timeout=1200)
+                            page.wait_for_timeout(120)
+                            self.logger.info(
+                                "Easy Apply: selected existing %s document '%s' from LinkedIn template",
+                                kind,
+                                filename_text,
+                            )
+                            return True
+                        except Exception:
+                            continue
+                return False
+
+            def _current_selected_document_name(kind: str) -> str:
+                cards = _collect_existing_document_cards(kind)
+                if not cards:
+                    return ""
+                # Best effort: selected card is typically rendered as the first visible filename.
+                return (cards[0][0] or "").strip()
+
             def _get_label(inp: Any) -> str:
                 try:
                     aria = inp.get_attribute("aria-label", timeout=400) or ""
@@ -8331,14 +8632,31 @@ class TelegramJobSession:
                         page.wait_for_timeout(500)
                         continue
 
-                    if is_resume_slot and cv_path and Path(cv_path).exists():
-                        fi.set_input_files(cv_path)
+                    if is_resume_slot and cv_path:
+                        cv_candidate = Path(cv_path)
+                        if cv_candidate.exists() and cv_candidate.is_file():
+                            selected_resume = _current_selected_document_name("resume")
+                            if selected_resume and normalize_form_label(selected_resume).lower() == normalize_form_label(cv_candidate.name).lower():
+                                self.logger.info(
+                                    "Easy Apply: keeping existing selected resume '%s' (no re-upload)",
+                                    selected_resume,
+                                )
+                                continue
+                            fi.set_input_files(cv_path)
+                            self.logger.info(
+                                "Easy Apply: uploaded CV file '%s'%s",
+                                Path(cv_path).name,
+                                " (hidden input)" if not fi_visible else "",
+                            )
+                            page.wait_for_timeout(500)
+                            continue
+
+                        if _select_existing_document("resume", cv_path):
+                            continue
                         self.logger.info(
-                            "Easy Apply: uploaded CV file '%s'%s",
-                            Path(cv_path).name,
-                            " (hidden input)" if not fi_visible else "",
+                            "Easy Apply: requested existing resume '%s' not found in LinkedIn template choices; skipping upload fallback",
+                            cv_path,
                         )
-                        page.wait_for_timeout(500)
                         continue
 
                     current_files = ""

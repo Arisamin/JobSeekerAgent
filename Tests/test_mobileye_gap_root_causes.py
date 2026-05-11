@@ -210,7 +210,17 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn('include_hidden_file = True', src)
         self.assertIn('if fi_disabled:', src)
         self.assertIn('is_cover_slot = "cover" in hint_blob', src)
-        self.assertIn('_add("cover_letter_path", label or "Cover letter", "file")', src)
+        self.assertIn('"cover_letter_path"', src)
+        self.assertIn('existing_cover_template_options', src)
+
+    def test_scan_path_extracts_existing_resume_template_options(self):
+        src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
+        self.assertIn("def _extract_existing_document_template_options", src)
+        self.assertIn('existing_resume_template_options = _extract_existing_document_template_options("resume")', src)
+        self.assertIn('resume_type = "select" if existing_resume_template_options else "file"', src)
+        self.assertIn("Keep non-visible nodes too", src)
+        self.assertIn('"upload resume"', src)
+        self.assertIn("def _is_placeholder_option_text", src)
 
     def test_scan_path_reuses_apply_step_filler_for_custom_widgets(self):
         src = inspect.getsource(agent_engine.TelegramJobSession._scan_easy_apply_fields)
@@ -282,6 +292,8 @@ class TestMobileyeGapRootCauses(unittest.TestCase):
         self.assertIn("if not fi_visible and not (is_doc_slot or fi_required):", fill_src)
         self.assertIn("is_resume_slot", fill_src)
         self.assertIn("Easy Apply: uploaded CV file", fill_src)
+        self.assertIn("keeping existing selected resume", fill_src)
+        self.assertIn('_select_existing_document("resume", cv_path)', fill_src)
 
     def test_submit_fill_handles_standalone_and_aria_radio_groups(self):
         fill_src = inspect.getsource(agent_engine.TelegramJobSession._fill_easy_apply_modal)

@@ -162,6 +162,24 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertTrue(is_valid)
         self.assertEqual(normalized, "No")
 
+    def test_validate_apply_answer_accepts_cv_existing_template_option(self):
+        session = self._make_session()
+        session._apply_field_types = {"cv_path": "select"}
+        session._apply_field_options = {"cv_path": ["Ariel CV - 2026.pdf", "Ariel CV - 2025.pdf"]}
+
+        is_valid, _, normalized = session._validate_apply_answer("cv_path", "1")
+        self.assertTrue(is_valid)
+        self.assertEqual(normalized, "Ariel CV - 2026.pdf")
+
+    def test_validate_apply_answer_rejects_unknown_cv_existing_template_option(self):
+        session = self._make_session()
+        session._apply_field_types = {"cv_path": "select"}
+        session._apply_field_options = {"cv_path": ["Ariel CV - 2026.pdf", "Ariel CV - 2025.pdf"]}
+
+        is_valid, _, normalized = session._validate_apply_answer("cv_path", "CV not listed")
+        self.assertFalse(is_valid)
+        self.assertEqual(normalized, "")
+
     def test_normalize_scanned_field_type_corrects_common_misclassifications(self):
         session = self._make_session()
 
@@ -197,6 +215,57 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
                 field_type="text",
             ),
         )
+        self.assertEqual(
+            "select",
+            session._normalize_scanned_field_type(
+                field_key="cv_path",
+                label="Resume / CV",
+                field_type="select",
+            ),
+        )
+
+    def test_build_apply_form_fields_cv_path_select_uses_option_protocol(self):
+        session = self._make_session()
+        session._apply_field_options = {
+            "cv_path": ["Ariel CV - 2026.pdf", "Ariel CV - 2025.pdf"],
+        }
+
+        fields = session._build_apply_form_fields(
+            [("cv_path", "Resume / CV", "select")],
+            include_fixed_fields=False,
+        )
+        prompt = dict(fields)["cv_path"]
+
+        self.assertIn("🔽 Resume / CV", prompt)
+        self.assertIn("1) Ariel CV - 2026.pdf", prompt)
+        self.assertNotIn("file path", prompt.lower())
+
+    def test_build_apply_form_fields_cv_path_uses_local_file_fallback_options(self):
+        session = self._make_session()
+
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        cv1 = Path(temp_dir.name) / "Ariel CV - 2026 [2].pdf"
+        cv2 = Path(temp_dir.name) / "Ariel CV - 2025 [1].pdf"
+        cv1.write_text("x", encoding="utf-8")
+        cv2.write_text("x", encoding="utf-8")
+
+        session._saved_profile = {"cv_path": str(cv1)}
+        session._apply_field_options = {}
+
+        fields = session._build_apply_form_fields(
+            [("cv_path", "Upload resume", "file")],
+            include_fixed_fields=False,
+        )
+        prompt = dict(fields)["cv_path"]
+
+        self.assertEqual("select", session._apply_field_types.get("cv_path"))
+        cv_options = session._apply_field_options.get("cv_path", [])
+        self.assertGreaterEqual(len(cv_options), 2)
+        self.assertIn(str(cv1.resolve()), cv_options)
+        self.assertIn(str(cv2.resolve()), cv_options)
+        self.assertIn("🔽 Upload resume", prompt)
+        self.assertIn("Ariel CV - 2026 [2].pdf", prompt)
 
     def test_canonicalize_apply_label_collapses_short_duplicate_halves(self):
         session = self._make_session()
@@ -204,6 +273,11 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
             "Phone country code",
             session._canonicalize_apply_label("Phone country code Phone country code"),
         )
+
+    def test_canonicalize_apply_label_normalizes_machine_date_range_labels(self):
+        session = self._make_session()
+        self.assertEqual("From year", session._canonicalize_apply_label("Year of From"))
+        self.assertEqual("To month", session._canonicalize_apply_label("Month of To"))
 
     def test_build_apply_form_fields_truncates_displayed_options_for_large_select(self):
         session = self._make_session()
@@ -321,6 +395,95 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertNotIn("linkedin", keys)
         self.assertTrue(any(k.startswith("custom__") for k in keys))
 
+    def test_cmd_apply_forces_cv_reask_each_run_when_multiple_resume_options_exist(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+        session._current_job = {
+            "id": 70,
+            "title": "VMware engineer",
+            "company": "Bynet",
+            "url": "https://www.linkedin.com/jobs/view/4412741120/",
+        }
+        session._saved_profile = {
+            "cv_path": "Ariel CV - 2026 [2].pdf",
+        }
+
+        def _scan(_url):
+            session._apply_field_options = {
+                "cv_path": ["Ariel CV - 2026 [2].pdf", "Ariel CV - 2025 [1].pdf"],
+            }
+            return [
+                ("cv_path", "Upload resume", "select"),
+                ("email", "Email", "email"),
+            ]
+
+        session._scan_easy_apply_fields = _scan
+
+        self.assertTrue(session._cmd_apply())
+        self.assertNotIn("cv_path", session._apply_answers)
+        self.assertEqual(0, session._apply_question_idx)
+        self.assertTrue(any("Multiple existing resume choices" in msg for msg in sent_messages))
+
+    def test_cmd_apply_keeps_prefilled_cv_when_only_one_resume_option_exists(self):
+        session = self._make_session()
+        session._send = lambda _text, parse_mode="HTML": None
+        session._current_job = {
+            "id": 71,
+            "title": "VMware engineer",
+            "company": "Bynet",
+            "url": "https://www.linkedin.com/jobs/view/4412741120/",
+        }
+        session._saved_profile = {
+            "cv_path": "Ariel CV - 2026 [2].pdf",
+        }
+
+        def _scan(_url):
+            session._apply_field_options = {
+                "cv_path": ["Ariel CV - 2026 [2].pdf"],
+            }
+            return [
+                ("cv_path", "Upload resume", "select"),
+                ("email", "Email", "email"),
+            ]
+
+        session._scan_easy_apply_fields = _scan
+
+        self.assertTrue(session._cmd_apply())
+        self.assertEqual("Ariel CV - 2026 [2].pdf", session._apply_answers.get("cv_path"))
+
+    def test_cmd_apply_forces_cv_reask_with_local_cv_fallback_options(self):
+        session = self._make_session()
+        sent_messages = []
+        session._send = lambda text, parse_mode="HTML": sent_messages.append(text)
+
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        cv1 = Path(temp_dir.name) / "Ariel CV - 2026 [2].pdf"
+        cv2 = Path(temp_dir.name) / "Ariel CV - 2026 [3].pdf"
+        cv1.write_text("x", encoding="utf-8")
+        cv2.write_text("x", encoding="utf-8")
+
+        session._current_job = {
+            "id": 72,
+            "title": "Software Engineer",
+            "company": "IO River",
+            "url": "https://www.linkedin.com/jobs/view/4412557695/",
+        }
+        session._saved_profile = {
+            "cv_path": str(cv1),
+        }
+
+        session._scan_easy_apply_fields = lambda _url: [
+            ("phone", "Phone", "tel"),
+            ("email", "Email", "email"),
+            ("cv_path", "Upload resume", "file"),
+        ]
+
+        self.assertTrue(session._cmd_apply())
+        self.assertNotIn("cv_path", session._apply_answers)
+        self.assertTrue(any("Multiple existing resume choices" in msg for msg in sent_messages))
+
     def test_rescan_keeps_only_scanned_fields_and_appends_new_discovered_keys(self):
         session = self._make_session()
         session._easy_apply_run_mode = "search"
@@ -396,7 +559,7 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertIsNone(session._apply_answers.get("custom__country"))
         self.assertIn("Only a numbered reply finalizes", sent_messages[-1])
 
-        session._handle_apply_answer("2")
+        session._handle_apply_answer("1")
         self.assertEqual(session._apply_answers.get("custom__country"), "Albania")
         self.assertEqual(session._apply_question_idx, 1)
 
@@ -426,9 +589,9 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         session._send_current_apply_prompt()
         session._handle_apply_answer("Bang")
 
-        self.assertIn("2) Bangkok, Thailand", sent_messages[-1])
-        self.assertIn("3) Bangalore, India", sent_messages[-1])
-        session._handle_apply_answer("3")
+        self.assertIn("1) Bangkok, Thailand", sent_messages[-1])
+        self.assertIn("2) Bangalore, India", sent_messages[-1])
+        session._handle_apply_answer("2")
 
         self.assertEqual(session._apply_answers.get("custom__location"), "Bangalore, India")
         self.assertEqual(session._apply_question_idx, 1)
@@ -631,8 +794,8 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
             "location": "Tel Aviv",
         }
         session._saved_profile = {
-            "cv_path": r"C:\MyData\Ariel CV - 2026 [2].pdf",
-            "cover_letter_path": r"C:\MyData\Ariel CV - 2026 [2].pdf",
+            "cv_path": r"C:\__nonexistent__\Ariel CV - 2026 [2].pdf",
+            "cover_letter_path": r"C:\__nonexistent__\Ariel CV - 2026 [2].pdf",
             "custom__linkedin_profile__4661a6e4c0": "http://linkedin.com",
             "custom__how_did_you_hear_about_jfrog__7a1302ea68": "friend",
             "custom__follow_jfrog_to_stay_up_to_date_with_their_p__b52e1896f4": "No",
