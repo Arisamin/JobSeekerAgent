@@ -267,6 +267,53 @@ class TestApplyFieldPromptTypes(unittest.TestCase):
         self.assertIn("🔽 Upload resume", prompt)
         self.assertIn("Ariel CV - 2026 [2].pdf", prompt)
 
+    def test_build_apply_form_fields_humanizes_date_labels_and_skips_required_noise(self):
+        session = self._make_session()
+        session._apply_field_options = {
+            "custom__month_of_from__a": ["Month", "January", "February", "March"],
+            "custom__year_of_from__b": ["Year", "2026", "2025", "2024"],
+            "custom__from_required__c": ["Year", "2026", "2025", "2024"],
+            "custom__to_required__d": ["Year", "2026", "2025", "2024"],
+        }
+        scanned = [
+            ("custom__month_of_from__a", "Month of From", "select"),
+            ("custom__year_of_from__b", "Year of From", "select"),
+            ("custom__from_required__c", "From required", "select"),
+            ("custom__to_required__d", "To required", "select"),
+        ]
+
+        fields = session._build_apply_form_fields(scanned, include_fixed_fields=False)
+        keys = [key for key, _prompt in fields]
+        prompts = {key: prompt for key, prompt in fields}
+
+        self.assertIn("custom__month_of_from__a", keys)
+        self.assertIn("custom__year_of_from__b", keys)
+        self.assertNotIn("custom__from_required__c", keys)
+        self.assertNotIn("custom__to_required__d", keys)
+        self.assertIn("Select the start month for this date range", prompts["custom__month_of_from__a"])
+        self.assertIn("Select the start year for this date range", prompts["custom__year_of_from__b"])
+        self.assertIn("(From month)", prompts["custom__month_of_from__a"])
+        self.assertIn("(From year)", prompts["custom__year_of_from__b"])
+
+    def test_build_apply_form_fields_date_prompt_uses_parent_question_context_when_available(self):
+        session = self._make_session()
+        session._apply_field_options = {
+            "custom__year_of_from__ctx": ["Year", "2026", "2025", "2024"],
+        }
+        scanned = [
+            (
+                "custom__year_of_from__ctx",
+                "When did you work at Crossing Hurdles? - Year of From",
+                "select",
+            ),
+        ]
+
+        fields = session._build_apply_form_fields(scanned, include_fixed_fields=False)
+        prompt = dict(fields)["custom__year_of_from__ctx"]
+
+        self.assertIn("When did you work at Crossing Hurdles? - select the start year", prompt)
+        self.assertIn("(When did you work at Crossing Hurdles? - From year)", prompt)
+
     def test_canonicalize_apply_label_collapses_short_duplicate_halves(self):
         session = self._make_session()
         self.assertEqual(

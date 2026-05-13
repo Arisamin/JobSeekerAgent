@@ -23,6 +23,78 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def _acquire_single_instance_lock(lock_path: Path) -> Optional[Any]:
+    """Acquire a non-blocking process lock; return lock handle or None if already locked."""
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = open(lock_path, "a+", encoding="utf-8")
+    except Exception:
+        return None
+
+    # Ensure at least one byte exists for msvcrt byte-range locking.
+    try:
+        lock_file.seek(0)
+        existing = lock_file.read(1)
+        if not existing:
+            lock_file.seek(0)
+            lock_file.write("0")
+            lock_file.flush()
+    except Exception:
+        try:
+            lock_file.close()
+        except Exception:
+            pass
+        return None
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        try:
+            lock_file.close()
+        except Exception:
+            pass
+        return None
+
+    try:
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+    except Exception:
+        pass
+
+    return lock_file
+
+
+def _release_single_instance_lock(lock_file: Optional[Any]) -> None:
+    if lock_file is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        lock_file.close()
+    except Exception:
+        pass
+
+
 class StepFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         if not hasattr(record, "step"):
@@ -2664,9 +2736,9 @@ class TelegramJobSession:
     INTRO           – intro message sent, waiting for first command
     BROWSING_NEW    – iterating through new (this-run) jobs one by one
     BROWSING_DB     – iterating through all DB jobs one by one
+    SEARCH_WIZARD   – collecting parameters for an on-demand new search run
     APPLYING        – Q&A form in progress (collecting answers for a job)
     APPLY_CONFIRM   – summary shown, waiting for Submit or Cancel
-    DONE            – session terminated
 
     Commands (case-insensitive)
     ---------------------------
@@ -2677,11 +2749,12 @@ class TelegramJobSession:
     preview – (after summary) fill LinkedIn Easy Apply form and stop before Submit for visual review
     modify N – (after summary) edit answer #N for this application only
     skip    – mark current job Skipped
+    search  – launch interactive new-search setup (query/max jobs/easy-only/reset-db/headless)
+    kill    – request service termination (requires explicit confirmation)
     startover – restart chat session from intro and browse this run from the start
-    done    – terminate session (process exits)
     db      – switch to DB-browse mode; send jobs one by one
     cancel  – abort an in-progress apply form or confirmation at any step
-    cancel  – if an apply is in progress, cancel it; otherwise no-op with help text
+    cancel  – abort apply or search setup; otherwise no-op with help text
     """
 
     VALID_STATUSES = ["Discovered", "Applied", "InProcess", "RejectedMe", "RejectedByMe", "Accepted", "Skipped", "Closed"]
@@ -2690,6 +2763,7 @@ class TelegramJobSession:
     STATE_INTRO = "INTRO"
     STATE_BROWSING_NEW = "BROWSING_NEW"
     STATE_BROWSING_DB = "BROWSING_DB"
+    STATE_SEARCH_WIZARD = "SEARCH_WIZARD"
     STATE_APPLYING = "APPLYING"
     STATE_APPLY_CONFIRM = "APPLY_CONFIRM"  # waiting for Submit/Cancel after summary
     STATE_DONE = "DONE"
@@ -2778,6 +2852,14 @@ class TelegramJobSession:
         query: str,
         logger: logging.Logger,
         easy_apply_run_mode: str = "search",
+        search_max_jobs_default: int = 8,
+        search_easy_apply_only_default: bool = False,
+        search_headless: bool = True,
+        search_user_data_dir: Optional[str] = None,
+        search_max_run_seconds: int = 180,
+        search_max_extract_seconds: int = 0,
+        search_per_card_seconds: int = 12,
+        search_result_filter_mode: str = LinkedInJobAgent.RESULT_FILTER_ALL,
     ):
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -2825,6 +2907,21 @@ class TelegramJobSession:
         if mode == "testing":
             mode = "headed"
         self._easy_apply_run_mode = mode if mode in {"search", "headed"} else "search"
+
+        # Runtime search defaults/settings for on-demand search runs via Telegram.
+        self._search_max_jobs_default = max(1, int(search_max_jobs_default or 1))
+        self._search_easy_apply_only_default = bool(search_easy_apply_only_default)
+        self._search_headless = bool(search_headless)
+        self._search_user_data_dir = search_user_data_dir
+        self._search_max_run_seconds = max(30, int(search_max_run_seconds or 30))
+        self._search_max_extract_seconds = max(0, int(search_max_extract_seconds or 0))
+        self._search_per_card_seconds = max(5, int(search_per_card_seconds or 5))
+        self._search_result_filter_mode = (search_result_filter_mode or LinkedInJobAgent.RESULT_FILTER_ALL).strip().lower()
+
+        self._search_wizard_step: str = ""
+        self._search_wizard_payload: Dict[str, Any] = {}
+        self._search_wizard_return_state: str = self.STATE_INTRO
+        self._kill_confirmation_pending: bool = False
 
     @staticmethod
     def _classify_apply_flow_transition(
@@ -4035,6 +4132,152 @@ class TelegramJobSession:
                     return True
                 return False
 
+            def _is_low_signal_select_label(label_text: str) -> bool:
+                lowered = normalize_form_label(label_text or "").lower().rstrip(":")
+                if not lowered:
+                    return True
+                low_signal = {
+                    "from",
+                    "to",
+                    "month",
+                    "year",
+                    "from month",
+                    "from year",
+                    "to month",
+                    "to year",
+                    "month of from",
+                    "year of from",
+                    "month of to",
+                    "year of to",
+                    "from required",
+                    "to required",
+                }
+                if lowered in low_signal:
+                    return True
+                words = [w for w in lowered.split() if w]
+                return len(words) <= 2
+
+            def _is_fragment_only_select_label(label_text: str) -> bool:
+                lowered = normalize_form_label(label_text or "").lower().rstrip(":")
+                fragment_only = {
+                    "from",
+                    "to",
+                    "month",
+                    "year",
+                    "from month",
+                    "from year",
+                    "to month",
+                    "to year",
+                    "month of from",
+                    "year of from",
+                    "month of to",
+                    "year of to",
+                    "from required",
+                    "to required",
+                }
+                return lowered in fragment_only
+
+            def _extract_parent_question_context(control: Any, own_label: str) -> str:
+                own_normalized = normalize_form_label(own_label or "")
+                own_lower = own_normalized.lower().rstrip(":")
+                if not own_normalized:
+                    return ""
+
+                candidates: List[str] = []
+
+                def _push(text: str) -> None:
+                    normalized = normalize_form_label(text or "")
+                    lowered = normalized.lower().rstrip(":")
+                    if not normalized:
+                        return
+                    if lowered == own_lower:
+                        return
+                    if is_generic_choice_label(normalized) or is_section_heading_label(normalized) or is_disclaimer_label(normalized):
+                        return
+                    if _is_placeholder_option_text(normalized, own_normalized):
+                        return
+                    if _is_fragment_only_select_label(normalized):
+                        return
+                    if any(existing.lower() == lowered for existing in candidates):
+                        return
+                    candidates.append(normalized)
+
+                def _push_from_id_refs(attr_name: str) -> None:
+                    try:
+                        refs = (control.get_attribute(attr_name, timeout=200) or "").strip()
+                    except Exception:
+                        refs = ""
+                    if not refs:
+                        return
+                    for token in refs.split():
+                        rid = token.strip()
+                        if not rid:
+                            continue
+                        try:
+                            ref_node = page.locator(f"#{rid}").first
+                            if ref_node.count() == 0:
+                                continue
+                            _push(ref_node.inner_text(timeout=200) or "")
+                        except Exception:
+                            continue
+
+                _push_from_id_refs("aria-labelledby")
+                _push_from_id_refs("aria-describedby")
+
+                try:
+                    fieldset = control.locator("xpath=ancestor::fieldset[1]").first
+                    if fieldset.count() > 0:
+                        try:
+                            legend = normalize_form_label(fieldset.locator("legend").first.inner_text(timeout=200) or "")
+                        except Exception:
+                            legend = ""
+                        _push(legend)
+                        try:
+                            _push(extract_question_label_from_block_text(fieldset.inner_text(timeout=250) or ""))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                for xpath in [
+                    "ancestor::*[contains(@class, 'jobs-easy-apply-form-section__grouping')][1]",
+                    "ancestor::*[contains(@class, 'fb-dash-form-element')][1]",
+                    "ancestor::*[contains(@class, 'jobs-easy-apply-form-element')][1]",
+                    "ancestor::*[@role='group'][1]",
+                ]:
+                    try:
+                        container = control.locator(f"xpath={xpath}").first
+                        if container.count() == 0:
+                            continue
+                        block = container.inner_text(timeout=250) or ""
+                        _push(extract_question_label_from_block_text(block))
+
+                        lines = [normalize_form_label(line) for line in block.splitlines()]
+                        lines = [line for line in lines if line]
+                        for line in lines:
+                            if "?" in line:
+                                _push(line)
+                        for line in lines:
+                            if len(line.split()) >= 2:
+                                _push(line)
+                    except Exception:
+                        continue
+
+                for depth in range(1, 8):
+                    try:
+                        anc = control.locator(f"xpath=ancestor::div[{depth}]").first
+                        if anc.count() == 0:
+                            continue
+                        block = anc.inner_text(timeout=200) or ""
+                        _push(extract_question_label_from_block_text(block))
+                    except Exception:
+                        continue
+
+                if not candidates:
+                    return ""
+                candidates.sort(key=lambda item: (("?" in item), len(item.split()), len(item)), reverse=True)
+                return candidates[0]
+
             def _add_from_card_template_payload(template_payload: Dict[str, Any]) -> int:
                 if not isinstance(template_payload, dict):
                     return 0
@@ -4311,6 +4554,20 @@ class TelegramJobSession:
                         label = _fallback_label_from_attrs(sel_el)
                     if not label:
                         continue
+                    if _is_low_signal_select_label(label):
+                        parent_context = _extract_parent_question_context(sel_el, label)
+                        if parent_context:
+                            self.logger.info(
+                                "Scan: contextualized low-signal select label %r -> %r",
+                                label,
+                                parent_context,
+                            )
+                            label = f"{parent_context} - {label}"
+                        else:
+                            self.logger.info(
+                                "Scan: no parent question context found for low-signal select label %r",
+                                label,
+                            )
                     pk = _profile_key_for(label)
                     key = pk if pk else self._custom_key_from_label(label)
                     if not pk:
@@ -4362,6 +4619,20 @@ class TelegramJobSession:
                         label = _fallback_label_from_attrs(cb)
                     if not label:
                         continue
+                    if _is_low_signal_select_label(label):
+                        parent_context = _extract_parent_question_context(cb, label)
+                        if parent_context:
+                            self.logger.info(
+                                "Scan: contextualized low-signal combobox label %r -> %r",
+                                label,
+                                parent_context,
+                            )
+                            label = f"{parent_context} - {label}"
+                        else:
+                            self.logger.info(
+                                "Scan: no parent question context found for low-signal combobox label %r",
+                                label,
+                            )
                     pk = _profile_key_for(label)
                     key = pk if pk else self._custom_key_from_label(label)
                     if not pk:
@@ -5983,6 +6254,133 @@ class TelegramJobSession:
                 )
             )
 
+        date_month_tokens = {
+            "jan", "january", "feb", "february", "mar", "march", "apr", "april", "may", "jun", "june",
+            "jul", "july", "aug", "august", "sep", "sept", "september", "oct", "october", "nov", "november", "dec", "december",
+        }
+
+        def _looks_year_option_set(options: List[str]) -> bool:
+            if not options:
+                return False
+            year_like = 0
+            for opt in options:
+                txt = normalize_form_label(opt or "").lower()
+                if txt == "year":
+                    continue
+                if re.fullmatch(r"(19|20)\d{2}", txt):
+                    year_like += 1
+            return year_like >= 3
+
+        def _looks_month_option_set(options: List[str]) -> bool:
+            if not options:
+                return False
+            month_like = 0
+            numeric_month_like = 0
+            for opt in options:
+                txt = normalize_form_label(opt or "").lower()
+                if txt == "month":
+                    continue
+                if txt in date_month_tokens:
+                    month_like += 1
+                    continue
+                if re.fullmatch(r"\d{1,2}", txt):
+                    try:
+                        val = int(txt)
+                        if 1 <= val <= 12:
+                            numeric_month_like += 1
+                    except Exception:
+                        pass
+            return month_like >= 3 or numeric_month_like >= 3
+
+        def _date_fragment_parts(field_key: str, label_text: str, options: List[str]) -> Optional[Tuple[str, str]]:
+            normalized = normalize_form_label(label_text or "")
+            lower_label = normalized.lower().rstrip(":")
+            lower_key = (field_key or "").lower()
+
+            edge = ""
+            if "from" in lower_key or lower_label.startswith("from"):
+                edge = "From"
+            elif "to" in lower_key or lower_label.startswith("to"):
+                edge = "To"
+
+            part = ""
+            if "year" in lower_key or lower_label.startswith("year") or _looks_year_option_set(options):
+                part = "year"
+            elif "month" in lower_key or lower_label.startswith("month") or _looks_month_option_set(options):
+                part = "month"
+
+            if edge and part:
+                return (edge, part)
+            return None
+
+        def _date_fragment_parent_context(label_text: str, edge: str, part: str) -> str:
+            normalized = normalize_form_label(label_text or "")
+            if not normalized:
+                return ""
+
+            fragment_forms = {
+                f"{edge.lower()} {part}",
+                f"{part} of {edge.lower()}",
+                edge.lower(),
+                part,
+                "from required",
+                "to required",
+            }
+
+            def _is_fragment_only(segment: str) -> bool:
+                lowered = normalize_form_label(segment or "").lower().rstrip(":")
+                return lowered in fragment_forms
+
+            candidates: List[str] = []
+            for sep in [" - ", " | ", " / ", ": "]:
+                if sep not in normalized:
+                    continue
+                segments = [normalize_form_label(seg) for seg in normalized.split(sep)]
+                segments = [seg for seg in segments if seg]
+                if len(segments) < 2:
+                    continue
+                for seg in segments:
+                    if _is_fragment_only(seg):
+                        continue
+                    if is_generic_choice_label(seg) or is_section_heading_label(seg) or is_disclaimer_label(seg):
+                        continue
+                    if any(existing.lower() == seg.lower() for existing in candidates):
+                        continue
+                    candidates.append(seg)
+
+            if not candidates:
+                lowered = normalized.lower().rstrip(":")
+                if not _is_fragment_only(normalized) and not is_generic_choice_label(normalized):
+                    if "?" in normalized or len(normalized.split()) >= 5:
+                        if lowered not in fragment_forms:
+                            candidates.append(normalized)
+
+            if not candidates:
+                return ""
+            candidates.sort(key=lambda item: (("?" in item), len(item.split()), len(item)), reverse=True)
+            return candidates[0]
+
+        def _humanize_date_fragment_label(field_key: str, label_text: str, options: List[str]) -> str:
+            parts = _date_fragment_parts(field_key, label_text, options)
+            if parts:
+                edge, part = parts
+                context = _date_fragment_parent_context(label_text, edge, part)
+                if context:
+                    return f"{context} - {edge} {part}"
+                return f"{edge} {part}"
+            return normalize_form_label(label_text or "")
+
+        def _date_fragment_question_text(field_key: str, label_text: str, options: List[str]) -> str:
+            parts = _date_fragment_parts(field_key, label_text, options)
+            if not parts:
+                return ""
+            edge, part = parts
+            edge_word = "start" if edge == "From" else "end"
+            context = _date_fragment_parent_context(label_text, edge, part)
+            if context:
+                return f"{context} - select the {edge_word} {part}"
+            return f"Select the {edge_word} {part} for this date range"
+
         for key, label, ftype in scanned:
             if key in fixed_keys:
                 continue
@@ -5991,6 +6389,7 @@ class TelegramJobSession:
             normalized_ftype = (ftype or "").strip().lower()
             clean_label = self._canonicalize_apply_label(label) or label or key
             canonical_label_key = normalize_form_label(clean_label).lower()
+            date_prompt_label_source = clean_label
 
             options = list(self._apply_field_options.get(key, []) or [])
             if not options and normalized_ftype in option_field_types and canonical_label_key:
@@ -6009,6 +6408,22 @@ class TelegramJobSession:
                         "Apply fields: using %d local CV file option(s) for cv_path selection fallback",
                         len(options),
                     )
+
+            # Skip known noisy pseudo-fields emitted by some date widgets.
+            key_lower = (key or "").lower()
+            if key_lower.startswith("custom__from_required") or key_lower.startswith("custom__to_required"):
+                continue
+
+            # Normalize date fragment labels so prompts are meaningful.
+            if normalized_ftype == "select":
+                clean_label = _humanize_date_fragment_label(key, clean_label, options)
+
+            canonical_label_key = normalize_form_label(clean_label).lower()
+            if canonical_label_key in {"from required", "to required"}:
+                continue
+            if canonical_label_key in {"from", "to"} and ("from" in key_lower or "to" in key_lower):
+                # Generic edge-only labels are too ambiguous for operators.
+                continue
 
             if options and normalized_ftype in option_field_types and canonical_label_key:
                 canonical_bucket = options_by_canonical_label.setdefault(canonical_label_key, [])
@@ -6052,7 +6467,14 @@ class TelegramJobSession:
             if normalized_ftype in {"radio", "checkbox"}:
                 prompt = f"❓ {display_label} (type your answer):{options_block}{arabic_note}"
             elif normalized_ftype == "select":
-                prompt = f"🔽 {display_label} (type your choice):{options_block}{arabic_note}"
+                date_question = _date_fragment_question_text(key, date_prompt_label_source, options)
+                if date_question:
+                    prompt = (
+                        f"🔽 {date_question} ({display_label}) (type your choice):"
+                        f"{options_block}{arabic_note}"
+                    )
+                else:
+                    prompt = f"🔽 {display_label} (type your choice):{options_block}{arabic_note}"
             elif normalized_ftype == "file":
                 if key == "cover_letter_path":
                     prompt = "📝 Cover letter file path (full path, or reply 'none' if not available):"
@@ -6550,7 +6972,7 @@ class TelegramJobSession:
             f"🧠 Recommendation: {recommendation}\n"
             f"{apply_icon} Apply Mode: {html.escape(apply_mode)}\n"
             f'🔗 <a href="{url}">{url}</a>\n\n'
-            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b>"
+            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>Kill</b>"
         )
 
     def _db_card_text(self, job: Dict, index: int, total: int) -> str:
@@ -6571,8 +6993,303 @@ class TelegramJobSession:
             f"🧠 Recommendation: {recommendation}\n"
             f"{apply_icon} Apply Mode: {html.escape(apply_mode)}\n"
             f'🔗 <a href="{url}">{url}</a>\n\n'
-            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Done</b>"
+            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>Kill</b>"
         )
+
+    def _parse_yes_no(self, value: str) -> Optional[bool]:
+        lowered = (value or "").strip().lower()
+        if lowered in {"y", "yes", "true", "1", "on"}:
+            return True
+        if lowered in {"n", "no", "false", "0", "off"}:
+            return False
+        return None
+
+    def _start_kill_confirmation(self, from_done_alias: bool = False) -> bool:
+        self._kill_confirmation_pending = True
+        alias_note = "\nℹ️ <b>Done</b> was renamed to <b>Kill</b>." if from_done_alias else ""
+        self._send(
+            "🛑 <b>Kill requested</b>\n"
+            "This will terminate the bot process. On a GUI-less server it is not self-recovering."
+            f"{alias_note}\n\n"
+            "Reply <b>Kill now</b> to terminate, or <b>Cancel</b> to keep service running."
+        )
+        return True
+
+    def _handle_kill_confirmation_input(self, raw: str) -> bool:
+        cmd = (raw or "").strip().lower()
+        if cmd in {"cancel", "no", "abort", "quit", "stop", "keep", "keep running"}:
+            self._kill_confirmation_pending = False
+            self._send("✅ Kill cancelled. Service remains online.")
+            return True
+
+        if cmd in {"kill now", "confirm kill", "yes kill", "terminate"}:
+            self._kill_confirmation_pending = False
+            self._state = self.STATE_DONE
+            self._send("🛑 Kill confirmed. Shutting down Telegram session now.")
+            return False
+
+        self._send(
+            "⚠️ Kill confirmation pending. Reply <b>Kill now</b> to terminate, or <b>Cancel</b> to continue running."
+        )
+        return True
+
+    def _start_search_wizard(self) -> bool:
+        self._search_wizard_step = "query"
+        self._search_wizard_payload = {
+            "query": self.query,
+            "max_jobs": self._search_max_jobs_default,
+            "easy_apply_only": self._search_easy_apply_only_default,
+            "reset_db": False,
+            "headless": self._search_headless,
+        }
+        self._search_wizard_return_state = self._state
+        self._state = self.STATE_SEARCH_WIZARD
+        self._send(
+            "🔎 <b>New Search Setup</b>\n"
+            "I will collect search parameters, then execute a fresh LinkedIn scan in this always-on service."
+        )
+        self._send_search_wizard_prompt()
+        return True
+
+    def _abort_search_wizard(self, reason: str = "cancelled") -> bool:
+        self._search_wizard_step = ""
+        self._search_wizard_payload = {}
+        self._state = self._search_wizard_return_state or self.STATE_INTRO
+        self._send(
+            f"ℹ️ Search setup {html.escape(reason)}. "
+            "Service stays online. Reply <b>Next</b> | <b>db</b> | <b>Search</b>."
+        )
+        return True
+
+    def _send_search_wizard_prompt(self) -> None:
+        step = self._search_wizard_step
+        payload = self._search_wizard_payload
+        if step == "query":
+            self._send(
+                "1/5 Search keywords.\n"
+                f"Current default: <b>{html.escape(str(payload.get('query') or self.query))}</b>\n"
+                "Send new keywords, or reply <b>same</b>."
+            )
+            return
+        if step == "max_jobs":
+            self._send(
+                "2/5 Max jobs to add this run.\n"
+                f"Current default: <b>{int(payload.get('max_jobs') or self._search_max_jobs_default)}</b>\n"
+                "Send an integer between 1 and 200, or reply <b>same</b>."
+            )
+            return
+        if step == "easy_apply_only":
+            current_mode = "easy" if bool(payload.get("easy_apply_only")) else "normal"
+            self._send(
+                "3/5 Apply-mode filter for discovery.\n"
+                f"Current default: <b>{current_mode}</b>\n"
+                "Reply <b>easy</b> (Easy Apply only), <b>normal</b> (all apply modes), or <b>same</b>."
+            )
+            return
+        if step == "reset_db":
+            current_reset = "yes" if bool(payload.get("reset_db")) else "no"
+            self._send(
+                "4/5 Reset DB before running search?\n"
+                f"Current default: <b>{current_reset}</b>\n"
+                "Reply <b>yes</b> or <b>no</b> (or <b>same</b>)."
+            )
+            return
+        if step == "headless":
+            current_headless = "yes" if bool(payload.get("headless")) else "no"
+            self._send(
+                "5/5 Run browser headless?\n"
+                f"Current default: <b>{current_headless}</b>\n"
+                "Reply <b>yes</b> or <b>no</b> (or <b>same</b>)."
+            )
+            return
+        if step == "confirm":
+            mode_text = "Easy Apply only" if bool(payload.get("easy_apply_only")) else "All apply modes"
+            reset_text = "Yes" if bool(payload.get("reset_db")) else "No"
+            headless_text = "Yes" if bool(payload.get("headless")) else "No"
+            self._send(
+                "✅ <b>Search Request Summary</b>\n"
+                f"• Query: <b>{html.escape(str(payload.get('query') or ''))}</b>\n"
+                f"• Max jobs: <b>{int(payload.get('max_jobs') or 1)}</b>\n"
+                f"• Filter: <b>{mode_text}</b>\n"
+                f"• Reset DB: <b>{reset_text}</b>\n"
+                f"• Headless: <b>{headless_text}</b>\n\n"
+                "Reply <b>Run</b> to execute, <b>Cancel</b> to abort, or <b>Edit query|max_jobs|mode|reset_db|headless</b>."
+            )
+
+    def _run_search_request(self) -> bool:
+        payload = dict(self._search_wizard_payload)
+        base_dir = self.db.db_path.parent
+
+        query = str(payload.get("query") or "").strip()
+        max_jobs = max(1, int(payload.get("max_jobs") or 1))
+        easy_apply_only = bool(payload.get("easy_apply_only"))
+        reset_db = bool(payload.get("reset_db"))
+        headless = bool(payload.get("headless"))
+
+        self._send(
+            "🚀 Running a fresh search now.\n"
+            f"Query: <b>{html.escape(query)}</b> | Max jobs: <b>{max_jobs}</b> | "
+            f"Mode: <b>{'easy' if easy_apply_only else 'normal'}</b>"
+        )
+
+        try:
+            if reset_db:
+                try:
+                    self.db.close()
+                except Exception:
+                    pass
+                reset_processed_jobs_db(base_dir)
+                self.db = ProcessedJobsDB(base_dir / "processed_jobs.db")
+
+            run_agent = LinkedInJobAgent(
+                base_dir=base_dir,
+                max_jobs=max_jobs,
+                headless=headless,
+                query=query,
+                user_data_dir=self._search_user_data_dir,
+                max_run_seconds=self._search_max_run_seconds,
+                max_extract_seconds=self._search_max_extract_seconds,
+                per_card_seconds=self._search_per_card_seconds,
+                easy_apply_only=easy_apply_only,
+                result_filter_mode=self._search_result_filter_mode,
+                keep_db_open=False,
+            )
+            run_agent.run()
+
+            try:
+                self.db.close()
+            except Exception:
+                pass
+            self.db = ProcessedJobsDB(base_dir / "processed_jobs.db")
+
+            reported_urls = {entry.get("url") for entry in (run_agent.report_entries or []) if entry.get("url")}
+            all_db = self.db.get_all_jobs()
+            self.new_jobs = [job for job in all_db if job.get("url") in reported_urls]
+            self.query = query
+
+            self._search_max_jobs_default = max_jobs
+            self._search_easy_apply_only_default = easy_apply_only
+            self._search_headless = headless
+
+            report_path = str(run_agent.report_output_path) if run_agent.report_output_path else "(not generated)"
+            self._send(
+                "✅ Fresh search completed.\n"
+                f"• New jobs in this run: <b>{len(self.new_jobs)}</b>\n"
+                f"• Report: <code>{html.escape(report_path)}</code>"
+            )
+        except Exception as exc:
+            self.logger.error(f"Search command failed: {exc}")
+            self._send(f"❌ Search failed: {html.escape(str(exc))}")
+            self._search_wizard_step = "confirm"
+            self._state = self.STATE_SEARCH_WIZARD
+            self._send_search_wizard_prompt()
+            return True
+
+        self._search_wizard_step = ""
+        self._search_wizard_payload = {}
+        self._state = self.STATE_INTRO
+        self.send_intro()
+        return True
+
+    def _handle_search_wizard_input(self, raw: str) -> bool:
+        text = (raw or "").strip()
+        lowered = text.lower()
+        if lowered in {"cancel", "quit", "abort", "stop"}:
+            return self._abort_search_wizard("cancelled")
+
+        step = self._search_wizard_step
+        payload = self._search_wizard_payload
+        if not step:
+            return self._abort_search_wizard("closed")
+
+        if step == "query":
+            if lowered != "same":
+                if not text:
+                    self._send("⚠️ Query cannot be empty. Send keywords or <b>same</b>.")
+                    return True
+                payload["query"] = text
+            self._search_wizard_step = "max_jobs"
+            self._send_search_wizard_prompt()
+            return True
+
+        if step == "max_jobs":
+            if lowered != "same":
+                try:
+                    parsed = int(text)
+                except Exception:
+                    self._send("⚠️ Max jobs must be an integer between 1 and 200.")
+                    return True
+                if parsed < 1 or parsed > 200:
+                    self._send("⚠️ Max jobs must be between 1 and 200.")
+                    return True
+                payload["max_jobs"] = parsed
+            self._search_wizard_step = "easy_apply_only"
+            self._send_search_wizard_prompt()
+            return True
+
+        if step == "easy_apply_only":
+            if lowered != "same":
+                if lowered in {"easy", "easyonly", "easy-only", "easy apply", "easy apply only"}:
+                    payload["easy_apply_only"] = True
+                elif lowered in {"normal", "all", "all modes"}:
+                    payload["easy_apply_only"] = False
+                else:
+                    self._send("⚠️ Reply with <b>easy</b>, <b>normal</b>, or <b>same</b>.")
+                    return True
+            self._search_wizard_step = "reset_db"
+            self._send_search_wizard_prompt()
+            return True
+
+        if step == "reset_db":
+            if lowered != "same":
+                parsed_bool = self._parse_yes_no(lowered)
+                if parsed_bool is None:
+                    self._send("⚠️ Reply with <b>yes</b>, <b>no</b>, or <b>same</b>.")
+                    return True
+                payload["reset_db"] = parsed_bool
+            self._search_wizard_step = "headless"
+            self._send_search_wizard_prompt()
+            return True
+
+        if step == "headless":
+            if lowered != "same":
+                parsed_bool = self._parse_yes_no(lowered)
+                if parsed_bool is None:
+                    self._send("⚠️ Reply with <b>yes</b>, <b>no</b>, or <b>same</b>.")
+                    return True
+                payload["headless"] = parsed_bool
+            self._search_wizard_step = "confirm"
+            self._send_search_wizard_prompt()
+            return True
+
+        if step == "confirm":
+            if lowered in {"run", "go", "start", "execute", "search"}:
+                return self._run_search_request()
+            if lowered.startswith("edit "):
+                target = lowered.split(maxsplit=1)[1].strip()
+                mapping = {
+                    "query": "query",
+                    "max_jobs": "max_jobs",
+                    "max jobs": "max_jobs",
+                    "mode": "easy_apply_only",
+                    "easy": "easy_apply_only",
+                    "easy_apply_only": "easy_apply_only",
+                    "reset_db": "reset_db",
+                    "reset db": "reset_db",
+                    "headless": "headless",
+                }
+                next_step = mapping.get(target)
+                if not next_step:
+                    self._send("⚠️ Edit target must be one of: query, max_jobs, mode, reset_db, headless.")
+                    return True
+                self._search_wizard_step = next_step
+                self._send_search_wizard_prompt()
+                return True
+
+            self._send("⚠️ Reply <b>Run</b>, <b>Cancel</b>, or <b>Edit ...</b>.")
+            return True
+
+        return self._abort_search_wizard("closed")
 
     # ------------------------------------------------------------------
     # Command dispatch
@@ -6580,14 +7297,34 @@ class TelegramJobSession:
 
     def _handle_command(self, raw: str) -> bool:
         """
-        Process a single user message.  Returns True if session should
-        continue, False if it should terminate (Done).
+        Process a single user message.
         """
         command_text = raw.strip()
         cmd = command_text.lower()
         cmd_name, cmd_arg = (cmd.split(maxsplit=1) + [""])[:2] if cmd else ("", "")
         abort_aliases = {"cancel", "quit", "abort", "stop", "give up", "giveup"}
         startover_aliases = {"startover", "start over", "restart", "restart chat"}
+        search_aliases = {"search", "new search", "newsearch"}
+
+        if self._kill_confirmation_pending:
+            return self._handle_kill_confirmation_input(raw)
+
+        if cmd_name == "kill":
+            return self._start_kill_confirmation()
+        if cmd_name == "done":
+            return self._start_kill_confirmation(from_done_alias=True)
+
+        if cmd in search_aliases:
+            if self._apply_in_progress_job_id is not None:
+                self._send("ℹ️ Aborting current application flow and switching to new search setup.")
+                self._cmd_cancel_apply()
+            return self._start_search_wizard()
+
+        if self._state == self.STATE_SEARCH_WIZARD:
+            if cmd in startover_aliases:
+                self._abort_search_wizard("cancelled")
+                return self._cmd_startover()
+            return self._handle_search_wizard_input(raw)
 
         # --- In-progress apply guard -----------------------------------------
         if self._apply_in_progress_job_id is not None:
@@ -6614,7 +7351,7 @@ class TelegramJobSession:
                 return True
 
             # Still in Q&A phase — block navigation commands
-            if cmd_name in {"next", "apply", "skip", "db", "done", "submit", "preview", "review"}:
+            if cmd_name in {"next", "apply", "skip", "db", "submit", "preview", "review"}:
                 jid = self._apply_in_progress_job_id
                 self._send(
                     f"⚠️ Job application for job ID <code>{jid}</code> is still in progress.\n"
@@ -6625,8 +7362,6 @@ class TelegramJobSession:
             return self._handle_apply_answer(raw.strip())
 
         # --- Global commands -------------------------------------------------
-        if cmd_name == "done":
-            return self._cmd_done()
         if cmd_name == "db":
             return self._cmd_db()
         if cmd in startover_aliases:
@@ -6655,16 +7390,19 @@ class TelegramJobSession:
         # Unrecognised
         self._send(
             "❓ Unknown command.\n"
-            "Available: <b>Next</b> | <b>Next &lt;name&gt;</b> | <b>Apply</b> | <b>Skip</b> | <b>db</b> | <b>Startover</b> | <b>Done</b> | <b>Cancel</b>/<b>Quit</b>"
+            "Available: <b>Next</b> | <b>Next &lt;name&gt;</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>db</b> | <b>Kill</b> | <b>Startover</b> | <b>Cancel</b>/<b>Quit</b>"
         )
         return True
 
     # --- individual command handlers -----------------------------------------
 
     def _cmd_done(self) -> bool:
-        self._send("✅ Session complete. See you next run! 👋")
-        self._state = self.STATE_DONE
-        return False  # terminate
+        self._send(
+            "ℹ️ This service is always on.\n"
+            "To stop it, terminate the process from shell/task manager.\n"
+            "For a new scan, reply <b>Search</b> | <b>Kill</b>."
+        )
+        return self._start_kill_confirmation(from_done_alias=True)
 
     def _cmd_db(self) -> bool:
         self._db_jobs = [
@@ -6731,10 +7469,10 @@ class TelegramJobSession:
                 if filter_name:
                     self._send(
                         f"🔎 No more new jobs matched <b>{html.escape(filter_name)}</b>.\n"
-                        "Reply <b>db</b> to browse all DB jobs, or <b>Done</b> to finish."
+                        "Reply <b>db</b> to browse all DB jobs, or <b>Search</b> to run a fresh scan."
                     )
                     return True
-                self._send("✅ No more new jobs from this run.\nReply <b>db</b> to browse all DB jobs, or <b>Done</b> to finish.")
+                self._send("✅ No more new jobs from this run.\nReply <b>db</b> to browse all DB jobs, or <b>Search</b> to run a fresh scan.")
                 self._state = self.STATE_INTRO
                 self._current_job = None
                 return True
@@ -6750,9 +7488,9 @@ class TelegramJobSession:
             self._db_job_idx = next_idx
             if self._db_job_idx >= len(self._db_jobs):
                 if filter_name:
-                    self._send(f"🔎 No more DB jobs matched <b>{html.escape(filter_name)}</b>.\nReply <b>Done</b> to finish.")
+                    self._send(f"🔎 No more DB jobs matched <b>{html.escape(filter_name)}</b>.\nReply <b>Search</b> for a fresh scan.")
                     return True
-                self._send("✅ No more jobs in the database.\nReply <b>Done</b> to finish.")
+                self._send("✅ No more jobs in the database.\nReply <b>Search</b> for a fresh scan.")
                 self._state = self.STATE_INTRO
                 self._current_job = None
                 return True
@@ -6991,7 +7729,7 @@ class TelegramJobSession:
             return True
         self._send(
             f"⏭️ Skipped <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>.\n\n"
-            "Reply <b>Next</b> | <b>Done</b> | <b>db</b>"
+            "Reply <b>Next</b> | <b>Search</b> | <b>db</b>"
         )
         if self._state == self.STATE_BROWSING_NEW:
             self._new_job_idx += 1
@@ -7018,7 +7756,7 @@ class TelegramJobSession:
         self._state = self._return_state_after_apply
         self._send(
             f"🚫 Application for job ID <code>{jid}</code> cancelled.\n\n"
-            "Reply <b>Next</b> | <b>Done</b> | <b>db</b>"
+            "Reply <b>Next</b> | <b>Search</b> | <b>db</b>"
         )
         return True
 
@@ -7264,7 +8002,6 @@ class TelegramJobSession:
 
         # Remove bot-added numbering artifacts if they appear in captured labels.
         text = re.sub(r"^q\d+\s*:\s*", "", text, flags=re.IGNORECASE)
-        # Remove Arabic required marker that may appear in mixed-language labels.
         text = re.sub(r"\s*مطلوب\s*$", "", text, flags=re.IGNORECASE)
 
         # Normalize machine-style date range labels into readable prompts.
@@ -7305,7 +8042,6 @@ class TelegramJobSession:
 
         # Reduce low-signal suffix noise that appears in one of duplicated variants.
         base = re.sub(r"\bprivacy\s+policy\b", "", base, flags=re.IGNORECASE)
-        base = re.sub(r"[^a-z0-9\s]", " ", base)
         base = re.sub(r"\s+", " ", base).strip()
 
         if "family member" in base and "mobileye" in base:
@@ -7661,7 +8397,7 @@ class TelegramJobSession:
                 f"✅ <b>Application submitted successfully!</b>\n"
                 f"Role: <b>{html.escape(title)}</b> @ <b>{html.escape(company)}</b>\n"
                 f"Status set to <b>Applied</b>.\n\n"
-                "Reply <b>Next</b> to continue | <b>Done</b> to finish | <b>db</b> to browse DB"
+                "Reply <b>Next</b> to continue | <b>Search</b> for fresh scan | <b>db</b> to browse DB"
             )
         else:
             if "automatic submit could not be confirmed" in (message or "").lower():
@@ -9072,7 +9808,7 @@ class TelegramJobSession:
                 f"👋 <b>Job Agent Report</b> — {now_str}\n\n"
                 f"🔍 Query: <i>{html.escape(self.query)}</i>\n\n"
                 "📭 No new jobs found in this run.\n\n"
-                "Reply <b>db</b> to browse all DB jobs | <b>Startover</b> to restart this chat | <b>Done</b> to finish"
+                "Reply <b>db</b> to browse all DB jobs | <b>Startover</b> to restart this chat | <b>Search</b> for a fresh scan | <b>Kill</b> to stop"
             )
         else:
             companies = sorted({j.get("company", "?") for j in self.new_jobs if j.get("company")})
@@ -9085,15 +9821,17 @@ class TelegramJobSession:
                 "Commands:\n"
                 "  <b>Next</b>  – review first job\n"
                 "  <b>db</b>    – browse all DB jobs\n"
+                "  <b>Search</b> – run a fresh scan with interactive params\n"
+                "  <b>Kill</b> – stop service (confirmation required)\n"
                 "  <b>Startover</b> – restart this chat session\n"
-                "  <b>Done</b>  – finish for today"
+                "  Process also stops by confirmed Kill command"
             )
         self._send(body)
         self._state = self.STATE_INTRO
         if self.new_jobs:
             self._state = self.STATE_BROWSING_NEW
             # Do not pre-send the first job card; wait for explicit Next so
-            # user can choose db/done first.
+            # user can choose db/kill first.
             self._new_job_idx = -1
             self._current_job = None
 
@@ -9102,7 +9840,7 @@ class TelegramJobSession:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Block until the session ends (user says Done or process is interrupted)."""
+        """Block until process interruption or explicit confirmed Kill command."""
         self.send_intro()
 
         if self._state == self.STATE_DONE:
@@ -9152,7 +9890,7 @@ class TelegramJobSession:
                 self.logger.info(f"Telegram message received: {text!r}")
                 keep_going = self._handle_command(text)
                 if not keep_going:
-                    self.logger.info("Telegram session ended by user (Done)")
+                    self.logger.info("Telegram session stopped by internal handler signal")
                     return
 
 
@@ -9190,6 +9928,14 @@ def run_telegram_notify(
     bot_token: Optional[str] = None,
     chat_id: Optional[int] = None,
     easy_apply_run_mode: str = "search",
+    search_max_jobs_default: int = 8,
+    search_easy_apply_only_default: bool = False,
+    search_headless: bool = True,
+    search_user_data_dir: Optional[str] = None,
+    search_max_run_seconds: int = 180,
+    search_max_extract_seconds: int = 0,
+    search_per_card_seconds: int = 12,
+    search_result_filter_mode: str = LinkedInJobAgent.RESULT_FILTER_ALL,
 ) -> None:
     """
     Start an interactive Telegram session.  Reads BOT_TOKEN and CHAT_ID from
@@ -9222,6 +9968,14 @@ def run_telegram_notify(
         query=query,
         logger=logger,
         easy_apply_run_mode=easy_apply_run_mode,
+        search_max_jobs_default=search_max_jobs_default,
+        search_easy_apply_only_default=search_easy_apply_only_default,
+        search_headless=search_headless,
+        search_user_data_dir=search_user_data_dir,
+        search_max_run_seconds=search_max_run_seconds,
+        search_max_extract_seconds=search_max_extract_seconds,
+        search_per_card_seconds=search_per_card_seconds,
+        search_result_filter_mode=search_result_filter_mode,
     )
     session.run()
 
@@ -9335,6 +10089,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--telegram-chat-only",
+        action="store_true",
+        help=(
+            "Start Telegram interactive session without running a new search/scan first. "
+            "Uses existing DB contents."
+        ),
+    )
+    parser.add_argument(
         "--telegram-bot-token",
         type=str,
         default=None,
@@ -9388,74 +10150,122 @@ def reset_processed_jobs_db(base_dir: Path) -> None:
 def main() -> None:
     args = parse_args()
     base_dir = Path(__file__).resolve().parent
+    telegram_service_requested = bool(args.telegram_notify or args.telegram_chat_only)
 
-    if args.reset_db:
-        reset_processed_jobs_db(base_dir)
-
-    if args.report_mode:
-        run_report_mode(args=args, base_dir=base_dir)
-        return
-
-    if args.run_skipped_maintenance:
-        maintenance = SkippedJobsMaintenanceTask(
-            base_dir=base_dir,
-            headless=True,
-        )
-        maintenance.run()
-        return
-
-    if args.serve_latest_report:
-        server = ReportActionsServer(
-            base_dir=base_dir,
-            host=args.report_host,
-            port=args.report_port,
-            open_browser=not args.no_open_browser,
-        )
-        server.run()
-        return
-
-    if args.user_db_update:
-        updater_gui = UserDBUpdateGUI(base_dir=base_dir)
-        updater_gui.run()
-        return
-
-    if args.user_db_update_cli:
-        updater = UserDBUpdateMode(base_dir=base_dir)
-        updater.run()
-        return
-
-    agent = LinkedInJobAgent(
-        base_dir=base_dir,
-        max_jobs=args.max_jobs,
-        headless=args.headless,
-        query=args.query,
-        user_data_dir=args.user_data_dir,
-        max_run_seconds=args.max_run_seconds,
-        max_extract_seconds=args.max_extract_seconds,
-        per_card_seconds=args.per_card_seconds,
-        easy_apply_only=args.easy_apply_only,
-        result_filter_mode=args.result_filter_mode,
-        keep_db_open=args.telegram_notify,
-    )
-    agent.run()
-
-    if args.telegram_notify:
-        # Build new-job list from DB records whose URLs match this run's report
-        reported_urls = {e["url"] for e in (agent.report_entries or [])}
-        all_db = agent.db.get_all_jobs()
-        new_job_dicts = [j for j in all_db if j.get("url") in reported_urls]
-        try:
-            run_telegram_notify(
-                new_jobs=new_job_dicts,
-                db=agent.db,
-                query=args.query,
-                logger=agent.logger,
-                bot_token=args.telegram_bot_token,
-                chat_id=args.telegram_chat_id,
-                easy_apply_run_mode=args.easy_apply_run_mode,
+    service_lock: Optional[Any] = None
+    if telegram_service_requested:
+        lock_path = base_dir / "Logs" / "telegram_notify_service.lock"
+        service_lock = _acquire_single_instance_lock(lock_path)
+        if service_lock is None:
+            print(
+                "⚠️ Telegram service is already running in another process. "
+                "Duplicate instance blocked by single-instance lock."
             )
-        finally:
-            agent.db.close()
+            return
+
+    try:
+        if args.reset_db:
+            reset_processed_jobs_db(base_dir)
+
+        if args.report_mode:
+            run_report_mode(args=args, base_dir=base_dir)
+            return
+
+        if args.run_skipped_maintenance:
+            maintenance = SkippedJobsMaintenanceTask(
+                base_dir=base_dir,
+                headless=True,
+            )
+            maintenance.run()
+            return
+
+        if args.serve_latest_report:
+            server = ReportActionsServer(
+                base_dir=base_dir,
+                host=args.report_host,
+                port=args.report_port,
+                open_browser=not args.no_open_browser,
+            )
+            server.run()
+            return
+
+        if args.user_db_update:
+            updater_gui = UserDBUpdateGUI(base_dir=base_dir)
+            updater_gui.run()
+            return
+
+        if args.user_db_update_cli:
+            updater = UserDBUpdateMode(base_dir=base_dir)
+            updater.run()
+            return
+
+        if args.telegram_chat_only:
+            logger = build_logger(base_dir)
+            db = ProcessedJobsDB(base_dir / "processed_jobs.db")
+            try:
+                run_telegram_notify(
+                    new_jobs=[],
+                    db=db,
+                    query=args.query,
+                    logger=logger,
+                    bot_token=args.telegram_bot_token,
+                    chat_id=args.telegram_chat_id,
+                    easy_apply_run_mode=args.easy_apply_run_mode,
+                    search_max_jobs_default=max(1, int(args.max_jobs or 1)),
+                    search_easy_apply_only_default=bool(args.easy_apply_only),
+                    search_headless=bool(args.headless),
+                    search_user_data_dir=args.user_data_dir,
+                    search_max_run_seconds=max(30, int(args.max_run_seconds or 30)),
+                    search_max_extract_seconds=max(0, int(args.max_extract_seconds or 0)),
+                    search_per_card_seconds=max(5, int(args.per_card_seconds or 5)),
+                    search_result_filter_mode=args.result_filter_mode,
+                )
+            finally:
+                db.close()
+            return
+
+        agent = LinkedInJobAgent(
+            base_dir=base_dir,
+            max_jobs=args.max_jobs,
+            headless=args.headless,
+            query=args.query,
+            user_data_dir=args.user_data_dir,
+            max_run_seconds=args.max_run_seconds,
+            max_extract_seconds=args.max_extract_seconds,
+            per_card_seconds=args.per_card_seconds,
+            easy_apply_only=args.easy_apply_only,
+            result_filter_mode=args.result_filter_mode,
+            keep_db_open=args.telegram_notify,
+        )
+        agent.run()
+
+        if args.telegram_notify:
+            # Build new-job list from DB records whose URLs match this run's report
+            reported_urls = {e["url"] for e in (agent.report_entries or [])}
+            all_db = agent.db.get_all_jobs()
+            new_job_dicts = [j for j in all_db if j.get("url") in reported_urls]
+            try:
+                run_telegram_notify(
+                    new_jobs=new_job_dicts,
+                    db=agent.db,
+                    query=args.query,
+                    logger=agent.logger,
+                    bot_token=args.telegram_bot_token,
+                    chat_id=args.telegram_chat_id,
+                    easy_apply_run_mode=args.easy_apply_run_mode,
+                    search_max_jobs_default=args.max_jobs,
+                    search_easy_apply_only_default=args.easy_apply_only,
+                    search_headless=args.headless,
+                    search_user_data_dir=args.user_data_dir,
+                    search_max_run_seconds=args.max_run_seconds,
+                    search_max_extract_seconds=args.max_extract_seconds,
+                    search_per_card_seconds=args.per_card_seconds,
+                    search_result_filter_mode=args.result_filter_mode,
+                )
+            finally:
+                agent.db.close()
+    finally:
+        _release_single_instance_lock(service_lock)
 
 
 if __name__ == "__main__":

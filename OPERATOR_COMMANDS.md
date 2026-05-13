@@ -21,6 +21,13 @@ Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 .\Start_Agent_Search_Mode.bat [options]
 ```
 
+Chat-only Telegram mode (no search upfront):
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\Start_Agent_Chat_Only.bat [options]
+```
+
 Advanced direct run (bypass launcher defaults):
 
 ```powershell
@@ -51,13 +58,15 @@ Important:
 |---|---|---|---|---|
 | Searching | `.\Start_Agent_Search_Mode.bat [options]` | Discover new jobs, analyze, then operate via Telegram | `--max-jobs`, `--reset-db`, `--headless`, `--easy-apply-only`, `--result-filter-mode`, `--query` | Launcher always appends `--telegram-notify --max-jobs 5 --easy-apply-run-mode search --headless` before your extra options |
 | Report | `.\Start_Report_Mode.bat` | One-shot report generation/update | Usually none for launcher path | Stops after report cycle |
-| Apply-only workflow (no search) | `.\.venv\Scripts\python.exe .\agent_engine.py --telegram-notify --max-jobs 0 [options]` | Launch Telegram session and apply from existing DB jobs only | `--max-jobs 0`, `--easy-apply-run-mode`, optional `--headless` | Equivalent to searching with zero new job target |
+| Chat-only (no search upfront) | `.\Start_Agent_Chat_Only.bat [options]` | Launch Telegram session immediately using existing DB only | `--max-jobs`, `--headless`, `--easy-apply-run-mode` | Uses new `--telegram-chat-only` path (no scan run) |
+| Apply-only workflow (legacy direct form) | `.\.venv\Scripts\python.exe .\agent_engine.py --telegram-chat-only [options]` | Launch Telegram session and apply from existing DB jobs only | `--easy-apply-run-mode`, optional `--headless` | Preferred over `--telegram-notify --max-jobs 0` when you want zero upfront scan |
 
 ## OPTION SCOPE TABLE
 
 | Option | Affects Searching | Affects Report | Affects Apply-only (`--max-jobs 0`) | Meaning |
 |---|---|---|---|---|
 | `--max-jobs N` | Yes | Indirect | Yes | Target number of newly added jobs; `0` means no new search intake |
+| `--telegram-chat-only` | No (bypasses scan) | No | Yes | Starts Telegram session immediately without running a search first |
 | `--reset-db` | Yes | Usually no | Usually no | Clears processed jobs DB before run |
 | `--query "..."` | Yes | Sometimes | Usually no | Search keywords for LinkedIn extraction |
 | `--easy-apply-only` | Yes | Sometimes | No practical effect | Discovery filter: keep Easy Apply jobs only |
@@ -95,7 +104,7 @@ Apply-only workflow (no new search, headed apply behavior):
 
 ```powershell
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
-.\.venv\Scripts\python.exe .\agent_engine.py --telegram-notify --max-jobs 0 --easy-apply-run-mode headed
+.\Start_Agent_Chat_Only.bat --easy-apply-run-mode headed
 ```
 
 ## DB RESET
