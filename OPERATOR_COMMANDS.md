@@ -76,6 +76,9 @@ Important:
 | `--easy-apply-run-mode search` | Yes | No practical effect | Yes | Apply-flow traversal style (incremental rescan behavior) |
 | `--easy-apply-run-mode headed` | Yes | No practical effect | Yes | Apply-flow traversal style with headed-friendly behavior |
 | `--headless` | Yes | Yes | Yes | Browser hidden when applied to direct python run |
+| `--report-host` | No practical effect | Yes | Yes | Bind address for report HTTP endpoints used by report UI and Telegram report download link |
+| `--report-port` | No practical effect | Yes | Yes | Port for report HTTP endpoints |
+| `--report-public-base-url` | No practical effect | No practical effect | Yes | Public URL prefix returned to Telegram for report download links |
 
 ## COPY-PASTE EXAMPLES BY MODE
 
@@ -106,6 +109,17 @@ Apply-only workflow (no new search, headed apply behavior):
 Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
 .\Start_Agent_Chat_Only.bat --easy-apply-run-mode headed
 ```
+
+Chat-only on remote server with downloadable report links:
+
+```powershell
+Set-Location "c:\MyData\Git\AI Projects\Job Seeker Agent"
+.\.venv\Scripts\python.exe .\agent_engine.py --telegram-chat-only --headless --report-host 0.0.0.0 --report-port 8765 --report-public-base-url "https://YOUR_PUBLIC_HOST:8765"
+```
+
+In Telegram, send:
+- `Report`
+- `Download report`
 
 ## DB RESET
 

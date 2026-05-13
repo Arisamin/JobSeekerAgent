@@ -135,6 +135,31 @@ def load_json(path: Path) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def latest_report_path(base_dir: Path) -> Optional[Path]:
+    reports_dir = base_dir / "Reports"
+    if not reports_dir.exists():
+        return None
+
+    def _report_sort_key(path: Path) -> Tuple[int, float]:
+        # Prefer the timestamp embedded in run_report_YYYYMMDD_HHMMSS.html.
+        # This avoids selecting an old report whose mtime was touched later.
+        match = re.match(r"^run_report_(\d{8}_\d{6})\.html$", path.name)
+        if match:
+            stamp = match.group(1)
+            try:
+                dt = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+                return (1, dt.timestamp())
+            except Exception:
+                pass
+        try:
+            return (0, path.stat().st_mtime)
+        except Exception:
+            return (0, 0.0)
+
+    report_files = sorted(reports_dir.glob("run_report_*.html"), key=_report_sort_key, reverse=True)
+    return report_files[0] if report_files else None
+
+
 def normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
@@ -1288,27 +1313,7 @@ class ReportActionsServer:
         self.open_browser = open_browser
 
     def _latest_report_path(self) -> Optional[Path]:
-        reports_dir = self.base_dir / "Reports"
-        if not reports_dir.exists():
-            return None
-        def _report_sort_key(path: Path) -> Tuple[int, float]:
-            # Prefer the timestamp embedded in run_report_YYYYMMDD_HHMMSS.html.
-            # This avoids selecting an old report whose mtime was touched later.
-            match = re.match(r"^run_report_(\d{8}_\d{6})\.html$", path.name)
-            if match:
-                stamp = match.group(1)
-                try:
-                    dt = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
-                    return (1, dt.timestamp())
-                except Exception:
-                    pass
-            try:
-                return (0, path.stat().st_mtime)
-            except Exception:
-                return (0, 0.0)
-
-        report_files = sorted(reports_dir.glob("run_report_*.html"), key=_report_sort_key, reverse=True)
-        return report_files[0] if report_files else None
+        return latest_report_path(self.base_dir)
 
     def _apply_updates(self, updates: List[Dict[str, Any]]) -> Tuple[bool, str, int]:
         db = ProcessedJobsDB(self.base_dir / "processed_jobs.db")
@@ -1432,6 +1437,142 @@ class ReportActionsServer:
             pass
         finally:
             httpd.server_close()
+
+
+class ReportDownloadLinkServer:
+    """Background HTTP server that exposes a downloadable latest-report endpoint."""
+
+    def __init__(
+        self,
+        base_dir: Path,
+        bind_host: str = "127.0.0.1",
+        port: int = 8765,
+        public_base_url: Optional[str] = None,
+        logger: Optional[logging.Logger] = None,
+    ):
+        self.base_dir = base_dir
+        self.bind_host = (bind_host or "127.0.0.1").strip()
+        self.port = int(port)
+        self.public_base_url = (public_base_url or "").strip().rstrip("/")
+        self.logger = logger
+        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._selected_port: int = 0
+
+    @property
+    def selected_port(self) -> int:
+        return self._selected_port
+
+    def _latest_report_path(self) -> Optional[Path]:
+        return latest_report_path(self.base_dir)
+
+    def _local_base_url(self) -> str:
+        host = self.bind_host
+        if host in {"0.0.0.0", "::"}:
+            host = "127.0.0.1"
+        return f"http://{host}:{self._selected_port}"
+
+    def _public_base_url(self) -> str:
+        if self.public_base_url:
+            return self.public_base_url
+        return self._local_base_url()
+
+    def download_url(self) -> str:
+        return f"{self._public_base_url()}/download-report"
+
+    def start(self) -> Tuple[bool, str]:
+        if self._httpd is not None and self._selected_port > 0:
+            return True, self.download_url()
+
+        report_path = self._latest_report_path()
+        if report_path is None:
+            return False, "No report found yet. Run Search first to generate a new HTML report."
+
+        server_context = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send_bytes(
+                self,
+                status_code: int,
+                content_type: str,
+                data: bytes,
+                extra_headers: Optional[Dict[str, str]] = None,
+            ) -> None:
+                self.send_response(status_code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                for key, value in (extra_headers or {}).items():
+                    self.send_header(key, value)
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self) -> None:
+                parsed = urlparse(self.path)
+                path = parsed.path
+                if path not in {"/", "/report", "/download", "/download-report"}:
+                    self._send_bytes(404, "text/plain; charset=utf-8", b"Not found")
+                    return
+
+                latest = server_context._latest_report_path()
+                if latest is None:
+                    self._send_bytes(404, "text/plain; charset=utf-8", b"No report found")
+                    return
+
+                try:
+                    payload = latest.read_bytes()
+                except Exception as exc:
+                    self._send_bytes(500, "text/plain; charset=utf-8", str(exc).encode("utf-8"))
+                    return
+
+                if path in {"/download", "/download-report"}:
+                    headers = {"Content-Disposition": f'attachment; filename="{latest.name}"'}
+                    self._send_bytes(200, "text/html; charset=utf-8", payload, headers)
+                    return
+
+                self._send_bytes(200, "text/html; charset=utf-8", payload)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        server_obj: Optional[ThreadingHTTPServer] = None
+        selected_port = 0
+        for candidate in range(self.port, self.port + 15):
+            try:
+                server_obj = ThreadingHTTPServer((self.bind_host, candidate), Handler)
+                selected_port = candidate
+                break
+            except OSError:
+                continue
+
+        if server_obj is None:
+            return False, f"Could not start report download server on ports {self.port}-{self.port + 14}."
+
+        self._httpd = server_obj
+        self._selected_port = selected_port
+        self._thread = threading.Thread(target=server_obj.serve_forever, daemon=True)
+        self._thread.start()
+
+        if self.logger is not None:
+            self.logger.info(
+                "Report download server started on %s; public link base=%s",
+                self._local_base_url(),
+                self._public_base_url(),
+            )
+
+        return True, self.download_url()
+
+    def stop(self) -> None:
+        if self._httpd is None:
+            return
+        try:
+            self._httpd.shutdown()
+            self._httpd.server_close()
+        except Exception:
+            pass
+        finally:
+            self._httpd = None
+            self._thread = None
+            self._selected_port = 0
 
 
 def run_report_mode(args: argparse.Namespace, base_dir: Path) -> None:
@@ -2750,6 +2891,7 @@ class TelegramJobSession:
     modify N – (after summary) edit answer #N for this application only
     skip    – mark current job Skipped
     search  – launch interactive new-search setup (query/max jobs/easy-only/reset-db/headless)
+    download report – return a clickable link for downloading the latest HTML report
     kill    – request service termination (requires explicit confirmation)
     startover – restart chat session from intro and browse this run from the start
     db      – switch to DB-browse mode; send jobs one by one
@@ -2860,6 +3002,9 @@ class TelegramJobSession:
         search_max_extract_seconds: int = 0,
         search_per_card_seconds: int = 12,
         search_result_filter_mode: str = LinkedInJobAgent.RESULT_FILTER_ALL,
+        report_download_host: str = "127.0.0.1",
+        report_download_port: int = 8765,
+        report_public_base_url: Optional[str] = None,
     ):
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -2892,6 +3037,7 @@ class TelegramJobSession:
         self._prefill_launch_thread: Optional[threading.Thread] = None
         self._prefill_launch_port: int = 0
         self._prefill_launch_payloads: Dict[str, Dict[str, Any]] = {}
+        self._report_download_server: Optional[ReportDownloadLinkServer] = None
         # Allow callers (e.g. test runners) to override the profile path via an
         # environment variable so that automated test runs never write to the
         # production telegram_profile.json.
@@ -2917,6 +3063,9 @@ class TelegramJobSession:
         self._search_max_extract_seconds = max(0, int(search_max_extract_seconds or 0))
         self._search_per_card_seconds = max(5, int(search_per_card_seconds or 5))
         self._search_result_filter_mode = (search_result_filter_mode or LinkedInJobAgent.RESULT_FILTER_ALL).strip().lower()
+        self._report_download_host = (report_download_host or "127.0.0.1").strip()
+        self._report_download_port = max(1, int(report_download_port or 8765))
+        self._report_public_base_url = (report_public_base_url or "").strip()
 
         self._search_wizard_step: str = ""
         self._search_wizard_payload: Dict[str, Any] = {}
@@ -6972,7 +7121,7 @@ class TelegramJobSession:
             f"🧠 Recommendation: {recommendation}\n"
             f"{apply_icon} Apply Mode: {html.escape(apply_mode)}\n"
             f'🔗 <a href="{url}">{url}</a>\n\n'
-            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>Kill</b>"
+            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>Report</b> | <b>Kill</b>"
         )
 
     def _db_card_text(self, job: Dict, index: int, total: int) -> str:
@@ -6993,7 +7142,7 @@ class TelegramJobSession:
             f"🧠 Recommendation: {recommendation}\n"
             f"{apply_icon} Apply Mode: {html.escape(apply_mode)}\n"
             f'🔗 <a href="{url}">{url}</a>\n\n'
-            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>Kill</b>"
+            "Reply: <b>Next</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>Report</b> | <b>Kill</b>"
         )
 
     def _parse_yes_no(self, value: str) -> Optional[bool]:
@@ -7003,6 +7152,39 @@ class TelegramJobSession:
         if lowered in {"n", "no", "false", "0", "off"}:
             return False
         return None
+
+    def _cmd_download_report(self) -> bool:
+        base_dir = self.db.db_path.parent
+        latest = latest_report_path(base_dir)
+        if latest is None:
+            self._send("📭 No HTML report found yet. Reply <b>Search</b> to generate one first.")
+            return True
+
+        if self._report_download_server is None:
+            self._report_download_server = ReportDownloadLinkServer(
+                base_dir=base_dir,
+                bind_host=self._report_download_host,
+                port=self._report_download_port,
+                public_base_url=self._report_public_base_url,
+                logger=self.logger,
+            )
+
+        ok, details = self._report_download_server.start()
+        if not ok:
+            self._send(
+                "❌ Could not start report download endpoint.\n"
+                f"Reason: <code>{html.escape(details)}</code>"
+            )
+            return True
+
+        download_url = details
+        self._send(
+            "📄 <b>Latest report download link</b>\n"
+            f"• File: <code>{html.escape(latest.name)}</code>\n"
+            f"• Download: <a href=\"{html.escape(download_url)}\">{html.escape(download_url)}</a>\n\n"
+            "After download, open the HTML file locally in your browser."
+        )
+        return True
 
     def _start_kill_confirmation(self, from_done_alias: bool = False) -> bool:
         self._kill_confirmation_pending = True
@@ -7305,6 +7487,16 @@ class TelegramJobSession:
         abort_aliases = {"cancel", "quit", "abort", "stop", "give up", "giveup"}
         startover_aliases = {"startover", "start over", "restart", "restart chat"}
         search_aliases = {"search", "new search", "newsearch"}
+        report_aliases = {
+            "report",
+            "report link",
+            "latest report",
+            "download report",
+            "download latest report",
+            "report download",
+            "download-report",
+            "download_report",
+        }
 
         if self._kill_confirmation_pending:
             return self._handle_kill_confirmation_input(raw)
@@ -7319,6 +7511,13 @@ class TelegramJobSession:
                 self._send("ℹ️ Aborting current application flow and switching to new search setup.")
                 self._cmd_cancel_apply()
             return self._start_search_wizard()
+
+        if (
+            cmd in report_aliases
+            or (cmd_name == "download" and cmd_arg in {"report", "latest report", "latest"})
+            or (cmd_name == "report" and cmd_arg in {"", "download", "link", "latest"})
+        ):
+            return self._cmd_download_report()
 
         if self._state == self.STATE_SEARCH_WIZARD:
             if cmd in startover_aliases:
@@ -7390,7 +7589,7 @@ class TelegramJobSession:
         # Unrecognised
         self._send(
             "❓ Unknown command.\n"
-            "Available: <b>Next</b> | <b>Next &lt;name&gt;</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>db</b> | <b>Kill</b> | <b>Startover</b> | <b>Cancel</b>/<b>Quit</b>"
+            "Available: <b>Next</b> | <b>Next &lt;name&gt;</b> | <b>Apply</b> | <b>Skip</b> | <b>Search</b> | <b>Report</b> | <b>db</b> | <b>Kill</b> | <b>Startover</b> | <b>Cancel</b>/<b>Quit</b>"
         )
         return True
 
@@ -9808,7 +10007,7 @@ class TelegramJobSession:
                 f"👋 <b>Job Agent Report</b> — {now_str}\n\n"
                 f"🔍 Query: <i>{html.escape(self.query)}</i>\n\n"
                 "📭 No new jobs found in this run.\n\n"
-                "Reply <b>db</b> to browse all DB jobs | <b>Startover</b> to restart this chat | <b>Search</b> for a fresh scan | <b>Kill</b> to stop"
+                "Reply <b>db</b> to browse all DB jobs | <b>Report</b> for download link | <b>Search</b> for a fresh scan | <b>Kill</b> to stop"
             )
         else:
             companies = sorted({j.get("company", "?") for j in self.new_jobs if j.get("company")})
@@ -9822,6 +10021,7 @@ class TelegramJobSession:
                 "  <b>Next</b>  – review first job\n"
                 "  <b>db</b>    – browse all DB jobs\n"
                 "  <b>Search</b> – run a fresh scan with interactive params\n"
+                "  <b>Report</b> – get latest report download link\n"
                 "  <b>Kill</b> – stop service (confirmation required)\n"
                 "  <b>Startover</b> – restart this chat session\n"
                 "  Process also stops by confirmed Kill command"
@@ -9936,6 +10136,9 @@ def run_telegram_notify(
     search_max_extract_seconds: int = 0,
     search_per_card_seconds: int = 12,
     search_result_filter_mode: str = LinkedInJobAgent.RESULT_FILTER_ALL,
+    report_download_host: str = "127.0.0.1",
+    report_download_port: int = 8765,
+    report_public_base_url: Optional[str] = None,
 ) -> None:
     """
     Start an interactive Telegram session.  Reads BOT_TOKEN and CHAT_ID from
@@ -9976,6 +10179,9 @@ def run_telegram_notify(
         search_max_extract_seconds=search_max_extract_seconds,
         search_per_card_seconds=search_per_card_seconds,
         search_result_filter_mode=search_result_filter_mode,
+        report_download_host=report_download_host,
+        report_download_port=report_download_port,
+        report_public_base_url=report_public_base_url,
     )
     session.run()
 
@@ -10050,6 +10256,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8765,
         help="Port for report server",
+    )
+    parser.add_argument(
+        "--report-public-base-url",
+        type=str,
+        default=None,
+        help=(
+            "Public base URL for report download links returned in Telegram, "
+            "e.g. https://my-server.example.com:8765"
+        ),
     )
     parser.add_argument(
         "--no-open-browser",
@@ -10219,6 +10434,9 @@ def main() -> None:
                     search_max_extract_seconds=max(0, int(args.max_extract_seconds or 0)),
                     search_per_card_seconds=max(5, int(args.per_card_seconds or 5)),
                     search_result_filter_mode=args.result_filter_mode,
+                    report_download_host=args.report_host,
+                    report_download_port=args.report_port,
+                    report_public_base_url=args.report_public_base_url,
                 )
             finally:
                 db.close()
@@ -10261,6 +10479,9 @@ def main() -> None:
                     search_max_extract_seconds=args.max_extract_seconds,
                     search_per_card_seconds=args.per_card_seconds,
                     search_result_filter_mode=args.result_filter_mode,
+                    report_download_host=args.report_host,
+                    report_download_port=args.report_port,
+                    report_public_base_url=args.report_public_base_url,
                 )
             finally:
                 agent.db.close()

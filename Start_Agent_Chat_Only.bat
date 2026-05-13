@@ -23,6 +23,9 @@ REM
 REM   3) Pass Telegram token/chat ID for this run only:
 REM      .\Start_Agent_Chat_Only.bat --telegram-bot-token "<token>" --telegram-chat-id 123456789
 REM
+REM   4) Remote server mode with downloadable report links:
+REM      .\Start_Agent_Chat_Only.bat --report-host 0.0.0.0 --report-port 8765 --report-public-base-url "https://YOUR_PUBLIC_HOST:8765"
+REM
 REM Note:
 REM   Any arguments passed to this .bat are appended via %%* to python command.
 REM ---------------------------------------------------------------------------

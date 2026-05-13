@@ -122,3 +122,23 @@ class TestInteractiveSearchWizard(unittest.TestCase):
             self.assertEqual(session._state, session.STATE_SEARCH_WIZARD)
         finally:
             _cleanup(session)
+
+
+class TestReportCommandRouting(unittest.TestCase):
+    def test_download_report_aliases_route_to_handler(self):
+        session = _make_session()
+        try:
+            called = {"count": 0}
+
+            def _fake_cmd_download_report():
+                called["count"] += 1
+                return True
+
+            session._cmd_download_report = _fake_cmd_download_report
+
+            self.assertTrue(session._handle_command("download report"))
+            self.assertTrue(session._handle_command("report"))
+            self.assertTrue(session._handle_command("report link"))
+            self.assertEqual(called["count"], 3)
+        finally:
+            _cleanup(session)

@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import tempfile
+import urllib.request
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -34,6 +35,11 @@ class TestReportModeParsing(unittest.TestCase):
         with patch.object(sys, "argv", ["agent_engine.py", "--easy-apply-only"]):
             args = agent_engine.parse_args()
         self.assertTrue(args.easy_apply_only)
+
+    def test_parse_args_accepts_report_public_base_url(self):
+        with patch.object(sys, "argv", ["agent_engine.py", "--report-public-base-url", "https://reports.example.com"]):
+            args = agent_engine.parse_args()
+        self.assertEqual(args.report_public_base_url, "https://reports.example.com")
 
     def test_parse_args_defaults_result_filter_mode_to_all(self):
         with patch.object(sys, "argv", ["agent_engine.py"]):
@@ -91,6 +97,53 @@ class TestReportActionsServerLatestReport(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         self.assertEqual(selected.name, "run_report_20260411_000610.html")
+
+
+class TestReportDownloadLinkServer(unittest.TestCase):
+    def test_start_fails_when_no_report_exists(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+
+        server = agent_engine.ReportDownloadLinkServer(
+            base_dir=base,
+            bind_host="127.0.0.1",
+            port=18960,
+        )
+        ok, details = server.start()
+
+        self.assertFalse(ok)
+        self.assertIn("No report found", details)
+
+    def test_start_returns_public_download_link_and_serves_attachment(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        base = Path(temp_dir.name)
+        reports = base / "Reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        report = reports / "run_report_20260513_120000.html"
+        report.write_text("<html><body>report</body></html>", encoding="utf-8")
+
+        server = agent_engine.ReportDownloadLinkServer(
+            base_dir=base,
+            bind_host="127.0.0.1",
+            port=18961,
+            public_base_url="https://reports.example.com",
+        )
+        self.addCleanup(server.stop)
+
+        ok, details = server.start()
+        self.assertTrue(ok)
+        self.assertEqual(details, "https://reports.example.com/download-report")
+
+        local_download = f"http://127.0.0.1:{server.selected_port}/download-report"
+        with urllib.request.urlopen(local_download, timeout=5) as resp:
+            payload = resp.read().decode("utf-8", errors="replace")
+            disposition = resp.headers.get("Content-Disposition", "")
+
+        self.assertIn("report", payload)
+        self.assertIn("attachment", disposition.lower())
+        self.assertIn("run_report_20260513_120000.html", disposition)
 
 
 class TestSearchUrlFilters(unittest.TestCase):
