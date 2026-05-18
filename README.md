@@ -98,3 +98,36 @@ By default, this run sends `Preview` after summary: LinkedIn opens, fields are f
 - Console prints `[TEST][PASS]`/`[TEST][FAIL]`
 - Summary file path: `Tests/Samples/auto_agoda_summary.txt`
 - Full simulated chat transcript path: `Tests/Samples/auto_agoda_chat_transcript.txt`
+
+## SSH Command Tool (WpfSshCommandTool)
+
+A Windows desktop utility for quickly generating and copying SSH commands with parameterized fields for server/service/process management.
+
+### Features
+- Reads command templates from the `SSH Commands` file in the project root.
+- Dynamically generates a UI with input fields for parameters (e.g., service name, process ID).
+- Click a button to copy the fully rendered SSH command to the clipboard.
+- Window automatically sizes to fit the content.
+
+### Usage
+1. Build and run the WpfSshCommandTool project:
+   ```powershell
+   cd WpfSshCommandTool
+   dotnet run
+   ```
+2. The tool will display a window with all available SSH commands and parameter fields.
+3. Edit any parameters as needed, then click the command button to copy the command to your clipboard.
+
+### Customizing Commands
+- Edit the `SSH Commands` file to add, remove, or modify command templates.
+- To expose a parameter in the UI, add a line like `$serviceName = job-seeker-agent.service` before the command. The tool will create an input box for each such parameter.
+
+### Example SSH Commands entry
+```
+Shutdown service:
+-----------------
+$serviceName = job-seeker-agent.service
+ssh -t -o StrictHostKeyChecking=accept-new user@host "sudo systemctl stop $serviceName; ..."
+```
+
+See the `SSH Commands` file for more examples.

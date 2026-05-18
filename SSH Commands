@@ -1,0 +1,23 @@
+ssh -t -o StrictHostKeyChecking=accept-new arieluser@49.13.199.61 "sudo systemctl stop job-seeker-agent.service; if systemctl is-active --quiet job-seeker-agent.service; then echo 'Service still running'; else echo 'Service stopped'; fi"
+
+Shutdown service:
+-----------------
+$serviceName = job-seeker-agent.service
+ssh -t -o StrictHostKeyChecking=accept-new arieluser@49.13.199.61 "sudo systemctl stop $serviceName; if systemctl is-active --quiet $serviceName; then echo 'Service still running'; else echo 'Service stopped'; fi"
+
+Service report:
+----------------
+ssh -o StrictHostKeyChecking=accept-new arieluser@49.13.199.61 "printf '%-50s %-6s %-8s %-12s %s\n' UNIT LOAD ACTIVE SUB DESCRIPTION; systemctl list-units --type=service --all --no-legend --no-pager | sort -k4,4"
+
+Service start:
+----------------
+ssh -t -o StrictHostKeyChecking=accept-new arieluser@49.13.199.61 "sudo systemctl start job-seeker-agent.service; systemctl is-active job-seeker-agent.service"
+
+Process report:
+----------------
+ssh -t -o StrictHostKeyChecking=accept-new arieluser@49.13.199.61 "echo '=== RUNNING PROCESSES ==='; ps -eo pid,ppid,user,%cpu,%mem,lstart,stat,tty,cmd --sort=-%cpu; echo; echo '=== PORTS IN USE (LISTEN) ==='; sudo ss -lntup"
+
+kill Process:
+---------------
+$targetPid = 130122
+ssh -t -o StrictHostKeyChecking=accept-new arieluser@49.13.199.61 "ps -fp $targetPid; sudo kill -TERM $targetPid; ps -fp $targetPid || echo 'Process stopped'"

@@ -1,0 +1,65 @@
+2026-05-15T19:35:27+03:00 ariel-server-2 python[230844]: 2026-05-15 19:35:27,434 <step_-> Telegram notify init: host=unknown-host pid=230844 token_source=env token_masked=835621...LaNE token_bot_id_hint=8356212243 chat_source=env chat_id=8356212243
+2026-05-15T19:35:27+03:00 ariel-server-2 python[230844]: Γä╣∩╕Å Telegram init: host=unknown-host pid=230844 token_source=env token_masked=835621...LaNE bot_id_hint=8356212243 chat_source=env chat_id=8356212243
+2026-05-15T19:35:27+03:00 ariel-server-2 python[230844]: 2026-05-15 19:35:27,586 <step_-> Telegram send failed: HTTP 403 HTTP Error 403: Forbidden; body={"ok":false,"error_code":403,"description":"Forbidden: the bot can't send messages to the bot"}
+2026-05-15T19:35:27+03:00 ariel-server-2 python[230844]: 2026-05-15 19:35:27,654 <step_-> Telegram plain-text fallback failed: HTTP Error 403: Forbidden
+2026-05-15T19:35:27+03:00 ariel-server-2 python[230844]: 2026-05-15 19:35:27,706 <step_-> Telegram session started, entering poll loop
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: Γä╣∩╕Å Job Seeker Agent startup: version=100 pid=232541 host=unknown-host
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: 2026-05-15 19:45:30,369 <step_-> Telegram identity:
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: host=unknown-host
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: pid=232541
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: version=100
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: token_source=env
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: token_full=8356212243:AAGVwfCyOkVsCiD5B7kgoLtkCLX3UOHLaNE
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: token_masked=835621...LaNE
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: token_bot_id_hint=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: bot_api_id=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: bot_username=ArielLinkedInAgentBot
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_source=env
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: requested_chat_id_raw=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: resolved_chat_id=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: requested_chat_kind=private_or_user
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_equals_bot_id=True
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_api_id=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_type=private
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_username=ArielLinkedInAgentBot
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_title=-
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_update_count=1
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_update_ids=135787426
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_chat_ids=6128016116
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_chat_types=private
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_from_ids=6128016116
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_from_usernames=ArielSam
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_sender_chat_ids=none
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: probe_status=ok
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: probe_errors=none
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: Γä╣∩╕Å Telegram identity:
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: host=unknown-host
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: pid=232541
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: version=100
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: token_source=env
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: token_full=8356212243:AAGVwfCyOkVsCiD5B7kgoLtkCLX3UOHLaNE
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: token_masked=835621...LaNE
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: token_bot_id_hint=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: bot_api_id=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: bot_username=ArielLinkedInAgentBot
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_source=env
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: requested_chat_id_raw=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: resolved_chat_id=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: requested_chat_kind=private_or_user
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_equals_bot_id=True
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_api_id=8356212243
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_type=private
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_username=ArielLinkedInAgentBot
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: chat_title=-
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_update_count=1
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_update_ids=135787426
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_chat_ids=6128016116
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_chat_types=private
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_from_ids=6128016116
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_from_usernames=ArielSam
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: recent_sender_chat_ids=none
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: probe_status=ok
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: probe_errors=none
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: 2026-05-15 19:45:30,476 <step_-> Telegram send failed: HTTP 403 HTTP Error 403: Forbidden; body={"ok":false,"error_code":403,"description":"Forbidden: the bot can't send messages to the bot"}
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: 2026-05-15 19:45:30,529 <step_-> Telegram plain-text fallback failed: HTTP Error 403: Forbidden
+2026-05-15T19:45:30+03:00 ariel-server-2 python[232541]: 2026-05-15 19:45:30,582 <step_-> Telegram poll bootstrap: skipped 1 stale update(s)

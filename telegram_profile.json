@@ -1,7 +1,7 @@
 {
   "chat_profiles": {
     "6128016116": {
-      "cv_path": "C:\\MyData\\Ariel CV - 2026 [2].pdf",
+      "cv_path": "C:\\MyData\\Ariel CV - 2026 [3].pdf",
       "full_name": "Ariel Samin",
       "email": "ariel.samin@gmail.com",
       "phone": "+972547535758",
@@ -36,7 +36,18 @@
       "custom__follow_papaya_to_stay_up_to_date_with_their__5907371645": "No",
       "custom__have_you_completed_the_following_level_of_ed__cdbbc7f8b7": "Yes",
       "custom__have_you_completed_the_following_level_of_ed__027326c005": "Yes",
-      "custom__follow_bellboy_robotics_to_stay_up_to_date_w__454f2d1911": "No"
+      "custom__follow_bellboy_robotics_to_stay_up_to_date_w__454f2d1911": "No",
+      "custom__follow_plus500__to_stay_up_to_date_with_thei__fffd20016d": "No",
+      "custom__follow_bynet_data_communications_to_stay_up__12e9a786b0": "No",
+      "custom__follow_sela_to_stay_up_to_date_with_their_pa__68fa863131": "No",
+      "custom__follow_io_river_to_stay_up_to_date_with_thei__034e9a0e1f": "No",
+      "custom__how_many_years_of_work_experience_do_you_hav__ef984c8099": "0",
+      "custom__how_many_years_of_work_experience_do_you_hav__0a38252e9c": "0",
+      "custom__are_you_willing_to_take_a_drug_test__in_acco__142d74b928": "Yes",
+      "custom__are_you_willing_to_take_a_drug_test__in_acco__62f559a4db": "Yes",
+      "custom__follow_ethosia_to_stay_up_to_date_with_their__1ec1f607c6": "No",
+      "custom__follow_dialog_to_stay_up_to_date_with_their__486aea8153": "No",
+      "custom__follow_calanit_by_one_to_stay_up_to_date_wit__55886bf263": "No"
     }
   }
 }

@@ -23,6 +23,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+AGENT_VERSION = "100"
+
+
+class TelegramPollConflictError(RuntimeError):
+    """Raised when Telegram getUpdates returns 409 (another poller is active)."""
+
+
 def _acquire_single_instance_lock(lock_path: Path) -> Optional[Any]:
     """Acquire a non-blocking process lock; return lock handle or None if already locked."""
     try:
@@ -3377,6 +3384,7 @@ class TelegramJobSession:
 
     def _get_updates(self, offset: int, timeout: int = 20) -> List[Dict]:
         """Long-poll for new messages."""
+        import urllib.error
         import urllib.request
         url = (
             f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
@@ -3388,6 +3396,25 @@ class TelegramJobSession:
                 return data.get("result", [])
         except KeyboardInterrupt:
             raise
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+
+            if exc.code == 409:
+                details = body or str(exc)
+                hint = (
+                    "Telegram getUpdates conflict (409): another client is already polling this bot token. "
+                    "Stop any parallel agent instance (local or remote) and retry."
+                )
+                self.logger.error(f"{hint} details={details}")
+                raise TelegramPollConflictError(hint) from exc
+
+            extra = f" body={body}" if body else ""
+            self.logger.warning(f"Telegram getUpdates HTTP error {exc.code}: {exc}{extra}")
+            return []
         except Exception as exc:
             self.logger.warning(f"Telegram getUpdates failed: {exc}")
             return []
@@ -10047,7 +10074,11 @@ class TelegramJobSession:
             return
 
         offset = 0
-        bootstrap_updates = self._get_updates(offset=offset, timeout=0)
+        try:
+            bootstrap_updates = self._get_updates(offset=offset, timeout=0)
+        except TelegramPollConflictError as exc:
+            self.logger.error(f"Telegram session aborted during bootstrap: {exc}")
+            return
         if bootstrap_updates:
             offset = bootstrap_updates[-1]["update_id"] + 1
             self.logger.info(f"Telegram poll bootstrap: skipped {len(bootstrap_updates)} stale update(s)")
@@ -10060,6 +10091,9 @@ class TelegramJobSession:
                 updates = self._get_updates(offset=offset, timeout=20)
                 interrupt_count = 0
                 interrupt_window_started = 0.0
+            except TelegramPollConflictError as exc:
+                self.logger.error(f"Telegram polling stopped: {exc}")
+                return
             except KeyboardInterrupt:
                 now_ts = time.time()
                 if interrupt_window_started and (now_ts - interrupt_window_started) <= 3.0:
@@ -10146,6 +10180,8 @@ def run_telegram_notify(
     """
     token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     cid_raw = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    token_source = "arg" if bot_token else "env"
+    chat_source = "arg" if chat_id else "env"
 
     if not token:
         logger.error("Telegram notify: TELEGRAM_BOT_TOKEN not set. Skipping.")
@@ -10162,6 +10198,139 @@ def run_telegram_notify(
         logger.error(f"Telegram notify: TELEGRAM_CHAT_ID is not a valid integer: {cid_raw!r}")
         print(f"❌ TELEGRAM_CHAT_ID must be a numeric chat ID, got: {cid_raw!r}")
         return
+
+    # Startup diagnostics for Telegram routing and chat-target identity.
+    token_bot_id_hint = token.split(":", 1)[0] if ":" in token else "unknown"
+    token_masked = f"{token[:6]}...{token[-4:]}" if len(token) >= 12 else "***masked***"
+    launch_host = os.environ.get("HOSTNAME") or os.environ.get("COMPUTERNAME") or "unknown-host"
+
+    # Probe Telegram API for explicit bot/chat identity details to aid routing diagnostics.
+    bot_api_id: Any = "unknown"
+    bot_username: str = "unknown"
+    chat_api_id: Any = "unknown"
+    chat_type: str = "unknown"
+    chat_username: str = ""
+    chat_title: str = ""
+    identity_probe_errors: List[str] = []
+    recent_update_count: int = 0
+    recent_update_ids: List[int] = []
+    recent_chat_ids: set[str] = set()
+    recent_chat_types: set[str] = set()
+    recent_from_ids: set[str] = set()
+    recent_from_usernames: set[str] = set()
+    recent_sender_chat_ids: set[str] = set()
+
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getMe", timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        if payload.get("ok"):
+            bot_info = payload.get("result") or {}
+            bot_api_id = bot_info.get("id", "unknown")
+            bot_username = str(bot_info.get("username") or "unknown")
+        else:
+            identity_probe_errors.append(f"getMe_not_ok:{payload.get('description', 'no_description')}")
+    except Exception as exc:
+        identity_probe_errors.append(f"getMe_error:{exc}")
+
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getChat?chat_id={cid}", timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        if payload.get("ok"):
+            chat_info = payload.get("result") or {}
+            chat_api_id = chat_info.get("id", "unknown")
+            chat_type = str(chat_info.get("type") or "unknown")
+            chat_username = str(chat_info.get("username") or "")
+            chat_title = str(chat_info.get("title") or "")
+        else:
+            identity_probe_errors.append(f"getChat_not_ok:{payload.get('description', 'no_description')}")
+    except Exception as exc:
+        identity_probe_errors.append(f"getChat_error:{exc}")
+
+    try:
+        import urllib.request
+
+        updates_url = (
+            f"https://api.telegram.org/bot{token}/getUpdates"
+            "?timeout=0&allowed_updates=%5B%22message%22%5D&limit=20"
+        )
+        with urllib.request.urlopen(updates_url, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        if payload.get("ok"):
+            updates = payload.get("result") or []
+            recent_update_count = len(updates)
+            for update in updates:
+                update_id = update.get("update_id")
+                if isinstance(update_id, int):
+                    recent_update_ids.append(update_id)
+
+                message = update.get("message") or {}
+                chat_obj = message.get("chat") or {}
+                from_obj = message.get("from") or {}
+                sender_chat_obj = message.get("sender_chat") or {}
+
+                if chat_obj.get("id") is not None:
+                    recent_chat_ids.add(str(chat_obj.get("id")))
+                if chat_obj.get("type"):
+                    recent_chat_types.add(str(chat_obj.get("type")))
+                if from_obj.get("id") is not None:
+                    recent_from_ids.add(str(from_obj.get("id")))
+                if from_obj.get("username"):
+                    recent_from_usernames.add(str(from_obj.get("username")))
+                if sender_chat_obj.get("id") is not None:
+                    recent_sender_chat_ids.add(str(sender_chat_obj.get("id")))
+        else:
+            identity_probe_errors.append(f"getUpdates_not_ok:{payload.get('description', 'no_description')}")
+    except Exception as exc:
+        identity_probe_errors.append(f"getUpdates_error:{exc}")
+
+    probe_status = "ok" if not identity_probe_errors else "partial"
+    probe_error_text = " | ".join(identity_probe_errors) if identity_probe_errors else "none"
+    recent_update_ids_text = ",".join(str(x) for x in sorted(recent_update_ids)[-10:]) if recent_update_ids else "none"
+    recent_chat_ids_text = ",".join(sorted(recent_chat_ids)) if recent_chat_ids else "none"
+    recent_chat_types_text = ",".join(sorted(recent_chat_types)) if recent_chat_types else "none"
+    recent_from_ids_text = ",".join(sorted(recent_from_ids)) if recent_from_ids else "none"
+    recent_from_usernames_text = ",".join(sorted(recent_from_usernames)) if recent_from_usernames else "none"
+    recent_sender_chat_ids_text = ",".join(sorted(recent_sender_chat_ids)) if recent_sender_chat_ids else "none"
+    requested_chat_kind = "group_or_channel" if cid < 0 else "private_or_user"
+    chat_equals_bot_id = str(bot_api_id) == str(cid) if bot_api_id != "unknown" else False
+
+    identity_properties: List[Tuple[str, Any]] = [
+        ("host", launch_host),
+        ("pid", os.getpid()),
+        ("version", AGENT_VERSION),
+        ("token_source", token_source),
+        ("token_full", token),
+        ("token_masked", token_masked),
+        ("token_bot_id_hint", token_bot_id_hint),
+        ("bot_api_id", bot_api_id),
+        ("bot_username", bot_username),
+        ("chat_source", chat_source),
+        ("requested_chat_id_raw", cid_raw),
+        ("resolved_chat_id", cid),
+        ("requested_chat_kind", requested_chat_kind),
+        ("chat_equals_bot_id", chat_equals_bot_id),
+        ("chat_api_id", chat_api_id),
+        ("chat_type", chat_type),
+        ("chat_username", chat_username or "-"),
+        ("chat_title", chat_title or "-"),
+        ("recent_update_count", recent_update_count),
+        ("recent_update_ids", recent_update_ids_text),
+        ("recent_chat_ids", recent_chat_ids_text),
+        ("recent_chat_types", recent_chat_types_text),
+        ("recent_from_ids", recent_from_ids_text),
+        ("recent_from_usernames", recent_from_usernames_text),
+        ("recent_sender_chat_ids", recent_sender_chat_ids_text),
+        ("probe_status", probe_status),
+        ("probe_errors", probe_error_text),
+    ]
+    identity_details = "\n".join(f"{key}={value}" for key, value in identity_properties)
+
+    logger.info("Telegram identity:\n%s", identity_details)
+    print("ℹ️ Telegram identity:\n" + identity_details)
 
     session = TelegramJobSession(
         bot_token=token,
@@ -10363,6 +10532,9 @@ def reset_processed_jobs_db(base_dir: Path) -> None:
 
 
 def main() -> None:
+    launch_host = os.environ.get("HOSTNAME") or os.environ.get("COMPUTERNAME") or "unknown-host"
+    print(f"ℹ️ Job Seeker Agent startup: version={AGENT_VERSION} pid={os.getpid()} host={launch_host}")
+
     args = parse_args()
     base_dir = Path(__file__).resolve().parent
     telegram_service_requested = bool(args.telegram_notify or args.telegram_chat_only)

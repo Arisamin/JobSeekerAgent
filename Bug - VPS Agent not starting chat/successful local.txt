@@ -1,0 +1,61 @@
+(.venv) PS C:\MyData\Git\AI Projects\Job Seeker Agent> .\Start_Agent_Chat_Only.bat
+Starting Job Seeker Agent in chat-only mode (no search)...
+
+ℹ️ Job Seeker Agent startup: version=100 pid=7256 host=LAPTOP-6MVL8K5G
+2026-05-15 19:42:08,188 <step_-> Telegram identity:
+host=LAPTOP-6MVL8K5G
+pid=7256
+version=100
+token_source=env
+token_full=8356212243:AAGVwfCyOkVsCiD5B7kgoLtkCLX3UOHLaNE
+token_masked=835621...LaNE
+token_bot_id_hint=8356212243
+bot_api_id=8356212243
+bot_username=ArielLinkedInAgentBot
+chat_source=env
+requested_chat_id_raw=6128016116
+resolved_chat_id=6128016116
+requested_chat_kind=private_or_user
+chat_equals_bot_id=False
+chat_api_id=6128016116
+chat_type=private
+chat_username=ArielSam
+chat_title=-
+recent_update_count=0
+recent_update_ids=none
+recent_chat_ids=none
+recent_chat_types=none
+recent_from_ids=none
+recent_from_usernames=none
+recent_sender_chat_ids=none
+probe_status=ok
+probe_errors=none
+ℹ️ Telegram identity:
+host=LAPTOP-6MVL8K5G
+pid=7256
+version=100
+token_source=env
+token_full=8356212243:AAGVwfCyOkVsCiD5B7kgoLtkCLX3UOHLaNE
+token_masked=835621...LaNE
+token_bot_id_hint=8356212243
+bot_api_id=8356212243
+bot_username=ArielLinkedInAgentBot
+chat_source=env
+requested_chat_id_raw=6128016116
+resolved_chat_id=6128016116
+requested_chat_kind=private_or_user
+chat_equals_bot_id=False
+chat_api_id=6128016116
+chat_type=private
+chat_username=ArielSam
+chat_title=-
+recent_update_count=0
+recent_update_ids=none
+recent_chat_ids=none
+recent_chat_types=none
+recent_from_ids=none
+recent_from_usernames=none
+recent_sender_chat_ids=none
+probe_status=ok
+probe_errors=none
+2026-05-15 19:42:11,908 <step_-> Telegram session started, entering poll loop
