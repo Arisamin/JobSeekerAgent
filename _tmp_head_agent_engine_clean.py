@@ -1583,7 +1583,7 @@ class LinkedInJobAgent:
             try:
                 context = playwright.chromium.launch_persistent_context(
                     user_data_dir=user_data_dir,
-                    channel="chrome",
+
                     headless=self.headless,
                     viewport={"width": 1440, "height": 900},
                 )
@@ -1593,7 +1593,7 @@ class LinkedInJobAgent:
                 os.makedirs(fallback_user_data_dir, exist_ok=True)
                 context = playwright.chromium.launch_persistent_context(
                     user_data_dir=fallback_user_data_dir,
-                    channel="chrome",
+
                     headless=self.headless,
                     viewport={"width": 1440, "height": 900},
                 )
@@ -2137,7 +2137,7 @@ class TelegramJobSession:
                 try:
                     ctx = pw.chromium.launch_persistent_context(
                         user_data_dir=primary_profile,
-                        channel="chrome",
+
                         headless=False,
                         viewport={"width": 1440, "height": 900},
                         slow_mo=100,
@@ -2147,7 +2147,7 @@ class TelegramJobSession:
                     _os.makedirs(fallback_profile, exist_ok=True)
                     ctx = pw.chromium.launch_persistent_context(
                         user_data_dir=fallback_profile,
-                        channel="chrome",
+
                         headless=False,
                         viewport={"width": 1440, "height": 900},
                         slow_mo=100,
@@ -2812,7 +2812,7 @@ class TelegramJobSession:
                 try:
                     ctx = pw.chromium.launch_persistent_context(
                         user_data_dir=primary_profile,
-                        channel="chrome",
+
                         headless=False,  # Show browser so user can handle captchas/MFA
                         viewport={"width": 1440, "height": 900},
                         slow_mo=150,
@@ -2822,7 +2822,7 @@ class TelegramJobSession:
                     _os.makedirs(fallback_profile, exist_ok=True)
                     ctx = pw.chromium.launch_persistent_context(
                         user_data_dir=fallback_profile,
-                        channel="chrome",
+
                         headless=False,
                         viewport={"width": 1440, "height": 900},
                         slow_mo=150,
